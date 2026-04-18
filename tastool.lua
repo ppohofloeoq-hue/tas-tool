@@ -41,6 +41,9 @@ local holdBack = false
 local holdForward = false
 local nextRepeatAt = 0
 
+-- Настройка скорости перемотки R/T:
+-- меньше fastScrubStep = медленнее
+-- больше repeatDelay = медленнее
 local firstRepeatDelay = 0.08
 local repeatDelay = 0.020
 local fastScrubStep = 2
@@ -264,6 +267,11 @@ local function cameraModeFromName(name)
 	end
 end
 
+local function inferShiftLockActive()
+	return UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
+		and player.CameraMode == Enum.CameraMode.Classic
+end
+
 local function nameToHumanoidState(name)
 	if name == "Running" then
 		return Enum.HumanoidStateType.Running
@@ -349,10 +357,6 @@ local function applyFrame(index)
 		frame.angVelZ or 0
 	)
 
-	camera.CameraType = Enum.CameraType.Scriptable
-	camera.CFrame = camCF
-	camera.FieldOfView = frame.fov or camera.FieldOfView
-
 	humanoid.CameraOffset = Vector3.new(
 		frame.camOffsetX or 0,
 		frame.camOffsetY or 0,
@@ -364,6 +368,10 @@ local function applyFrame(index)
 
 	humanoid.AutoRotate = false
 	humanoid:ChangeState(nameToHumanoidState(frame.humanoidStateName))
+
+	camera.CameraType = Enum.CameraType.Scriptable
+	camera.CFrame = camCF
+	camera.FieldOfView = frame.fov or camera.FieldOfView
 
 	state.frame = index
 	updateGui()
@@ -458,6 +466,7 @@ local function makeFrame(dt)
 
 		mouseBehaviorName = getMouseBehaviorName(),
 		cameraModeName = getCameraModeName(),
+		shiftLockActive = inferShiftLockActive(),
 		humanoidStateName = humanoid:GetState().Name,
 	}
 
@@ -505,14 +514,26 @@ local function resumeLiveFromRecordedFrame(frame)
 		return
 	end
 
-	local camCF = unpackCFrame(frame, "c_")
 	local linearVel = Vector3.new(frame.velX or 0, frame.velY or 0, frame.velZ or 0)
 	local angularVel = Vector3.new(frame.angVelX or 0, frame.angVelY or 0, frame.angVelZ or 0)
+	local rootCF = unpackCFrame(frame, "r_")
 
+	rootPart.CFrame = rootCF
 	rootPart.Anchored = false
-	humanoid.AutoRotate = true
 
-	applyRecordedLiveSettings(frame)
+	humanoid.AutoRotate = true
+	humanoid.CameraOffset = Vector3.new(
+		frame.camOffsetX or 0,
+		frame.camOffsetY or 0,
+		frame.camOffsetZ or 0
+	)
+
+	UserInputService.MouseBehavior = mouseBehaviorFromName(frame.mouseBehaviorName)
+	player.CameraMode = cameraModeFromName(frame.cameraModeName)
+
+	camera.CameraType = Enum.CameraType.Custom
+	camera.CameraSubject = humanoid
+	camera.FieldOfView = frame.fov or camera.FieldOfView
 
 	task.spawn(function()
 		RunService.Heartbeat:Wait()
@@ -522,7 +543,7 @@ local function resumeLiveFromRecordedFrame(frame)
 
 		rootPart.AssemblyLinearVelocity = linearVel
 		rootPart.AssemblyAngularVelocity = angularVel
-		camera.CFrame = camCF
+		humanoid:ChangeState(nameToHumanoidState(frame.humanoidStateName))
 	end)
 end
 
@@ -550,14 +571,22 @@ local function overwriteFromCurrentFrame()
 		table.remove(frames)
 	end
 
+	if replayConn then
+		replayConn:Disconnect()
+		replayConn = nil
+	end
+
 	state.mode = "recording"
 	state.frame = #frames
+	state.playOneFrame = false
+	holdBack = false
+	holdForward = false
+
+	resumeLiveFromRecordedFrame(chosenFrame)
 
 	if recordConn then
 		recordConn:Disconnect()
 	end
-
-	resumeLiveFromRecordedFrame(chosenFrame)
 
 	recordConn = RunService.RenderStepped:Connect(function(dt)
 		if state.mode ~= "recording" then
