@@ -1,10 +1,9 @@
 --[[
-TAS Lite v0.2 (Roblox, LocalScript/executor)
-- Record / Playback / Freeze / Seek
-- Save / Load replay as JSON file
-- Command bar: help, erase, setspeed, recordmode, cp
+TAS Lite v0.3 (Roblox, LocalScript/executor)
+- Stable record/playback timing
+- Freeze/seek with safe frame indexing
 - Checkpoints + append recording mode
-- No anticheat bypasses
+- Save/load JSON (backward compatible with v0.1/v0.2 frames)
 
 Hotkeys:
 F8  - start/stop record
@@ -23,7 +22,9 @@ Slash (/) - focus command bar
 
 local CONFIG = {
 	ROUND_DIGITS = 3,
+	DEFAULT_FRAME_DT = 1 / 60,
 	SEEK_SPEED = 1, -- frames per render step while holding R/T
+	PLAYBACK_SPEED = 1, -- realtime multiplier
 	FOLDER = "TASLite",
 	FILE_NAME = "Replay.json",
 }
@@ -47,15 +48,19 @@ local seekSpeed = CONFIG.SEEK_SPEED
 local recordMode = "replace" -- replace | append
 local checkpoints = {}
 local QUICK_CP_NAME = "quick"
-local applyFrame
 
-local function char()
-	return player.Character or player.CharacterAdded:Wait()
-end
+local playbackSpeed = CONFIG.PLAYBACK_SPEED
+local playbackAccumulator = 0
 
-local function humanoidRootPart()
-	local c = char()
-	return c and c:FindFirstChild("HumanoidRootPart")
+local playbackState = {
+	active = false,
+	humanoid = nil,
+	hrp = nil,
+	saved = nil,
+}
+
+local function log(msg)
+	print("[TAS Lite] " .. tostring(msg))
 end
 
 local function round(n, digits)
@@ -76,6 +81,9 @@ local function cfToTable(cf)
 end
 
 local function tableToCf(t)
+	if type(t) ~= "table" or #t < 12 then
+		return nil
+	end
 	return CFrame.new(unpack(t))
 end
 
@@ -84,6 +92,9 @@ local function v3ToTable(v)
 end
 
 local function tableToV3(t)
+	if type(t) ~= "table" or #t < 3 then
+		return Vector3.new()
+	end
 	return Vector3.new(t[1], t[2], t[3])
 end
 
@@ -98,6 +109,20 @@ local function keysSnapshot()
 	return out
 end
 
+local function char()
+	return player.Character or player.CharacterAdded:Wait()
+end
+
+local function humanoidAndRoot()
+	local c = char()
+	if not c then
+		return nil, nil
+	end
+	local hum = c:FindFirstChildOfClass("Humanoid")
+	local hrp = c:FindFirstChild("HumanoidRootPart")
+	return hum, hrp
+end
+
 local function ensureFolder()
 	if not isfolder(CONFIG.FOLDER) then
 		makefolder(CONFIG.FOLDER)
@@ -106,6 +131,143 @@ end
 
 local replayPath = CONFIG.FOLDER .. "/" .. tostring(game.PlaceId) .. "_" .. CONFIG.FILE_NAME
 
+local function clampIndex(idx)
+	if #frames == 0 then
+		return 1
+	end
+	local n = math.floor((idx or 1) + 0.5)
+	return math.clamp(n, 1, #frames)
+end
+
+local function setCameraPlaybackMode(enabled)
+	if enabled then
+		camera.CameraType = Enum.CameraType.Scriptable
+	else
+		camera.CameraType = Enum.CameraType.Custom
+	end
+end
+
+local function applyPlaybackLock()
+	local hum, hrp = humanoidAndRoot()
+	if not hum or not hrp then
+		return false
+	end
+
+	if not playbackState.active then
+		playbackState.active = true
+		playbackState.humanoid = hum
+		playbackState.hrp = hrp
+		playbackState.saved = {
+			WalkSpeed = hum.WalkSpeed,
+			JumpPower = hum.JumpPower,
+			AutoRotate = hum.AutoRotate,
+			Anchored = hrp.Anchored,
+		}
+	end
+
+	hum.WalkSpeed = 0
+	hum.JumpPower = 0
+	hum.AutoRotate = false
+	hrp.Anchored = true
+	return true
+end
+
+local function clearPlaybackLock()
+	if not playbackState.active then
+		return
+	end
+
+	local hum = playbackState.humanoid
+	local hrp = playbackState.hrp
+	local saved = playbackState.saved
+
+	if hum and hum.Parent and saved then
+		hum.WalkSpeed = saved.WalkSpeed
+		hum.JumpPower = saved.JumpPower
+		hum.AutoRotate = saved.AutoRotate
+	end
+	if hrp and hrp.Parent and saved then
+		hrp.Anchored = saved.Anchored
+	end
+
+	playbackState.active = false
+	playbackState.humanoid = nil
+	playbackState.hrp = nil
+	playbackState.saved = nil
+end
+
+local function normalizeFrame(rawFrame)
+	if type(rawFrame) ~= "table" then
+		return nil
+	end
+
+	-- v0.1/v0.2 compatibility (root/vel/cam/fov keys)
+	if rawFrame.root and rawFrame.cam then
+		local dt = tonumber(rawFrame.dt) or CONFIG.DEFAULT_FRAME_DT
+		return {
+			dt = math.max(dt, 1 / 1000),
+			root = rawFrame.root,
+			vel = rawFrame.vel or { 0, 0, 0 },
+			cam = rawFrame.cam,
+			fov = tonumber(rawFrame.fov) or 70,
+			keys = type(rawFrame.keys) == "table" and rawFrame.keys or {},
+		}
+	end
+
+	return nil
+end
+
+local function normalizeFrames(rawFrames)
+	if type(rawFrames) ~= "table" then
+		return {}
+	end
+	local out = {}
+	for i, frame in ipairs(rawFrames) do
+		local n = normalizeFrame(frame)
+		if n then
+			out[i] = n
+		end
+	end
+	return out
+end
+
+local function applyFrame(i)
+	local frame = frames[i]
+	if not frame then
+		return false
+	end
+
+	local _, hrp = humanoidAndRoot()
+	if not hrp then
+		return false
+	end
+
+	local rootCF = tableToCf(frame.root)
+	local camCF = tableToCf(frame.cam)
+	if not rootCF or not camCF then
+		return false
+	end
+
+	hrp.CFrame = rootCF
+	hrp.AssemblyLinearVelocity = tableToV3(frame.vel)
+	camera.CFrame = camCF
+	camera.FieldOfView = tonumber(frame.fov) or 70
+	return true
+end
+
+local function statusText()
+	return string.format(
+		"Mode: %s | Frozen: %s | Frame: %d/%d | RecordMode: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F9 Play  F6 Save  F7 Load  E Freeze  F/G Step  R/T Seek  C/V Checkpoint  / Command  U UI",
+		mode,
+		tostring(frozen),
+		playIndex,
+		#frames,
+		recordMode,
+		seekSpeed,
+		playbackSpeed
+	)
+end
+
 -- UI
 local gui = Instance.new("ScreenGui")
 gui.Name = "TASLiteUI"
@@ -113,7 +275,7 @@ gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = false
 
 local label = Instance.new("TextLabel")
-label.Size = UDim2.fromOffset(620, 100)
+label.Size = UDim2.fromOffset(760, 100)
 label.Position = UDim2.fromOffset(12, 12)
 label.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 label.BackgroundTransparency = 0.25
@@ -126,14 +288,14 @@ label.Text = ""
 label.Parent = gui
 
 local commandBar = Instance.new("TextBox")
-commandBar.Size = UDim2.fromOffset(620, 30)
+commandBar.Size = UDim2.fromOffset(760, 30)
 commandBar.Position = UDim2.fromOffset(12, 120)
 commandBar.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 commandBar.BackgroundTransparency = 0.25
 commandBar.TextColor3 = Color3.fromRGB(255, 255, 255)
 commandBar.TextXAlignment = Enum.TextXAlignment.Left
 commandBar.Font = Enum.Font.Code
-commandBar.PlaceholderText = "Command: help | erase | setspeed <number> | recordmode <replace|append> | cp <set|goto|list> ..."
+commandBar.PlaceholderText = "help | erase | setspeed <n> | playspeed <n> | recordmode <replace|append> | cp ..."
 commandBar.TextSize = 16
 commandBar.ClearTextOnFocus = false
 commandBar.Text = ""
@@ -151,30 +313,6 @@ end
 
 gui.Parent = getUIParent()
 
-local function setCameraPlaybackMode(enabled)
-	if enabled then
-		camera.CameraType = Enum.CameraType.Scriptable
-	else
-		camera.CameraType = Enum.CameraType.Custom
-	end
-end
-
-local function statusText()
-	return string.format(
-		"Mode: %s | Frozen: %s | Frame: %d/%d | RecordMode: %s | SeekSpeed: %.2f\nF8 Rec  F9 Play  F6 Save  F7 Load  E Freeze  F/G Step  R/T Seek  C/V Checkpoint  / Command  U UI",
-		mode,
-		tostring(frozen),
-		playIndex,
-		#frames,
-		recordMode,
-		seekSpeed
-	)
-end
-
-local function log(msg)
-	print("[TAS Lite] " .. msg)
-end
-
 local function updateUI()
 	label.Text = statusText()
 	gui.Enabled = uiVisible
@@ -185,14 +323,14 @@ local function getCurrentFrameIndex()
 		return 0
 	end
 	if mode == "play" then
-		return math.clamp(playIndex, 1, #frames)
+		return clampIndex(playIndex)
 	end
 	return #frames
 end
 
 local function setCheckpoint(name, index)
 	name = tostring(name or QUICK_CP_NAME)
-	local resolved = index or getCurrentFrameIndex()
+	local resolved = index and clampIndex(index) or getCurrentFrameIndex()
 	if resolved < 1 or resolved > #frames then
 		log("Cannot set checkpoint '" .. name .. "': invalid frame")
 		return false
@@ -209,23 +347,20 @@ local function gotoCheckpoint(name)
 		log("Checkpoint '" .. name .. "' not found")
 		return false
 	end
-	if idx < 1 or idx > #frames then
-		log("Checkpoint '" .. name .. "' points outside replay")
-		return false
-	end
-	playIndex = idx
+	playIndex = clampIndex(idx)
 	applyFrame(playIndex)
 	log("Goto checkpoint '" .. name .. "' -> frame " .. tostring(playIndex))
 	return true
 end
 
-local function captureFrame()
-	local hrp = humanoidRootPart()
+local function captureFrame(dt)
+	local _, hrp = humanoidAndRoot()
 	if not hrp then
 		return
 	end
 
 	local frame = {
+		dt = round(math.max(1 / 1000, dt or CONFIG.DEFAULT_FRAME_DT), 5),
 		root = roundArray(cfToTable(hrp.CFrame), CONFIG.ROUND_DIGITS),
 		vel = roundArray(v3ToTable(hrp.AssemblyLinearVelocity), CONFIG.ROUND_DIGITS),
 		cam = roundArray(cfToTable(camera.CFrame), CONFIG.ROUND_DIGITS),
@@ -236,45 +371,31 @@ local function captureFrame()
 	playIndex = #frames
 end
 
-applyFrame = function(i)
-	local frame = frames[i]
-	if not frame then
-		return false
-	end
-
-	local hrp = humanoidRootPart()
-	if not hrp then
-		return false
-	end
-
-	hrp.CFrame = tableToCf(frame.root)
-	hrp.AssemblyLinearVelocity = tableToV3(frame.vel)
-
-	camera.CFrame = tableToCf(frame.cam)
-	camera.FieldOfView = frame.fov
-
-	return true
-end
-
 local function startRecord()
 	mode = "record"
 	frozen = false
 	seekDir = 0
+	playbackAccumulator = 0
+	clearPlaybackLock()
+	setCameraPlaybackMode(false)
+
 	if recordMode == "replace" then
 		frames = {}
+		checkpoints = {}
 		playIndex = 1
 	else
 		playIndex = math.max(1, #frames)
 	end
-	setCameraPlaybackMode(false)
+
 	log("Recording started (" .. recordMode .. ")")
 end
 
 local function stopRecord()
-	if mode == "record" then
-		mode = "idle"
-		log("Recording stopped. Frames: " .. tostring(#frames))
+	if mode ~= "record" then
+		return
 	end
+	mode = "idle"
+	log("Recording stopped. Frames: " .. tostring(#frames))
 end
 
 local function startPlay()
@@ -286,31 +407,35 @@ local function startPlay()
 	frozen = false
 	seekDir = 0
 	playIndex = 1
+	playbackAccumulator = 0
 	setCameraPlaybackMode(true)
+	applyPlaybackLock()
 	log("Playback started")
 end
 
 local function stopPlay()
-	if mode == "play" then
-		mode = "idle"
-		frozen = false
-		seekDir = 0
-		setCameraPlaybackMode(false)
-		log("Playback stopped")
+	if mode ~= "play" then
+		return
 	end
+	mode = "idle"
+	frozen = false
+	seekDir = 0
+	playbackAccumulator = 0
+	clearPlaybackLock()
+	setCameraPlaybackMode(false)
+	log("Playback stopped")
 end
 
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.2",
+		version = "0.3",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
 		checkpoints = checkpoints,
 	}
-	local json = HttpService:JSONEncode(payload)
-	writefile(replayPath, json)
+	writefile(replayPath, HttpService:JSONEncode(payload))
 	log("Saved: " .. replayPath .. " | Frames: " .. tostring(#frames))
 end
 
@@ -319,24 +444,25 @@ local function loadReplay()
 		log("Replay file not found: " .. replayPath)
 		return
 	end
-	local raw = readfile(replayPath)
+
 	local ok, data = pcall(function()
-		return HttpService:JSONDecode(raw)
+		return HttpService:JSONDecode(readfile(replayPath))
 	end)
-	if not ok or type(data) ~= "table" or type(data.frames) ~= "table" then
+	if not ok or type(data) ~= "table" then
 		log("Invalid replay JSON")
 		return
 	end
-	frames = data.frames
+
+	local normalized = normalizeFrames(data.frames)
+	if #normalized == 0 then
+		log("Replay loaded but no valid frames found")
+		return
+	end
+
+	frames = normalized
 	checkpoints = type(data.checkpoints) == "table" and data.checkpoints or {}
 	playIndex = 1
-	log("Loaded replay. Frames: " .. tostring(#frames) .. " | Checkpoints: " .. tostring((function()
-		local count = 0
-		for _ in pairs(checkpoints) do
-			count = count + 1
-		end
-		return count
-	end)()))
+	log("Loaded replay. Frames: " .. tostring(#frames))
 end
 
 local function eraseReplay()
@@ -346,6 +472,8 @@ local function eraseReplay()
 	frozen = false
 	seekDir = 0
 	mode = "idle"
+	playbackAccumulator = 0
+	clearPlaybackLock()
 	setCameraPlaybackMode(false)
 	saveReplay()
 	log("Replay erased")
@@ -356,6 +484,7 @@ local function commandHelp()
 	log("help")
 	log("erase")
 	log("setspeed <number>")
+	log("playspeed <number>")
 	log("recordmode <replace|append>")
 	log("cp set <name> [frame]")
 	log("cp goto <name>")
@@ -390,6 +519,17 @@ local function runCommand(raw)
 		end
 		seekSpeed = newSpeed
 		log("Seek speed set to " .. tostring(seekSpeed))
+		return
+	end
+
+	if cmd == "playspeed" then
+		local newSpeed = tonumber(args[2])
+		if not newSpeed or newSpeed <= 0 then
+			log("Usage: playspeed <number > 0>")
+			return
+		end
+		playbackSpeed = newSpeed
+		log("Playback speed set to " .. tostring(playbackSpeed))
 		return
 	end
 
@@ -447,20 +587,17 @@ end
 
 UIS.InputBegan:Connect(function(input, gp)
 	if input.UserInputType == Enum.UserInputType.Keyboard then
-		local key = input.KeyCode.Name
-		heldKeys[key] = true
+		heldKeys[input.KeyCode.Name] = true
 	end
 
 	if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.Slash then
 		commandBar:CaptureFocus()
 	end
 
-	local focused = UIS:GetFocusedTextBox()
-	if focused and focused ~= nil then
+	if UIS:GetFocusedTextBox() then
 		updateUI()
 		return
 	end
-
 	if gp then
 		return
 	end
@@ -469,7 +606,6 @@ UIS.InputBegan:Connect(function(input, gp)
 	end
 
 	local kc = input.KeyCode
-
 	if kc == Enum.KeyCode.F8 then
 		if mode == "record" then
 			stopRecord()
@@ -494,12 +630,12 @@ UIS.InputBegan:Connect(function(input, gp)
 		end
 	elseif kc == Enum.KeyCode.F then
 		if mode == "play" and frozen then
-			playIndex = math.max(1, playIndex - 1)
+			playIndex = clampIndex(playIndex - 1)
 			applyFrame(playIndex)
 		end
 	elseif kc == Enum.KeyCode.G then
 		if mode == "play" and frozen then
-			playIndex = math.min(#frames, playIndex + 1)
+			playIndex = clampIndex(playIndex + 1)
 			applyFrame(playIndex)
 		end
 	elseif kc == Enum.KeyCode.R then
@@ -521,8 +657,7 @@ end)
 
 UIS.InputEnded:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.Keyboard then
-		local key = input.KeyCode.Name
-		heldKeys[key] = nil
+		heldKeys[input.KeyCode.Name] = nil
 	end
 
 	if input.KeyCode == Enum.KeyCode.R and seekDir == -1 then
@@ -540,26 +675,53 @@ commandBar.FocusLost:Connect(function(enterPressed)
 	updateUI()
 end)
 
-RunService.RenderStepped:Connect(function()
+RunService.RenderStepped:Connect(function(dt)
 	if mode == "record" then
-		captureFrame()
+		captureFrame(dt)
 	elseif mode == "play" then
+		if #frames == 0 then
+			stopPlay()
+			updateUI()
+			return
+		end
+
+		if not applyPlaybackLock() then
+			updateUI()
+			return
+		end
+
 		if frozen then
 			if seekDir ~= 0 then
-				playIndex = math.clamp(playIndex + seekDir * seekSpeed, 1, #frames)
-				applyFrame(playIndex)
+				playIndex = clampIndex(playIndex + seekDir * seekSpeed)
 			else
-				applyFrame(playIndex)
+				playIndex = clampIndex(playIndex)
 			end
+			applyFrame(playIndex)
 		else
-			local ok = applyFrame(playIndex)
-			if ok then
-				playIndex += 1
+			playbackAccumulator = playbackAccumulator + (dt * playbackSpeed)
+			while playbackAccumulator >= 0 do
+				local frame = frames[playIndex]
+				if not frame then
+					stopPlay()
+					break
+				end
+				local frameDt = math.max(tonumber(frame.dt) or CONFIG.DEFAULT_FRAME_DT, 1 / 1000)
+				if playbackAccumulator < frameDt then
+					break
+				end
+
+				local ok = applyFrame(playIndex)
+				if not ok then
+					stopPlay()
+					break
+				end
+
+				playbackAccumulator = playbackAccumulator - frameDt
+				playIndex = playIndex + 1
 				if playIndex > #frames then
 					stopPlay()
+					break
 				end
-			else
-				stopPlay()
 			end
 		end
 	end
@@ -567,6 +729,13 @@ RunService.RenderStepped:Connect(function()
 	updateUI()
 end)
 
-log("Loaded. PlaceId: " .. tostring(game.PlaceId))
+player.CharacterAdded:Connect(function()
+	if mode == "play" then
+		task.wait(0.2)
+		applyPlaybackLock()
+	end
+end)
+
+log("Loaded v0.3. PlaceId: " .. tostring(game.PlaceId))
 log("Type '/' to open command bar, then use 'help'")
 updateUI()
