@@ -1,9 +1,10 @@
 --[[
-TAS Lite v0.4 (Roblox, LocalScript/executor)
+TAS Lite v0.5 (Roblox, LocalScript/executor)
 - Stable record/playback timing
 - Freeze/seek with safe frame indexing
 - Checkpoints + append recording mode
 - Save/load JSON (backward compatible with v0.1/v0.2 frames)
+- On-screen log + record freeze/trim indicators
 
 Hotkeys:
 F8  - start/stop record
@@ -25,6 +26,7 @@ local CONFIG = {
 	DEFAULT_FRAME_DT = 1 / 60,
 	SEEK_SPEED = 1, -- frames per render step while holding R/T
 	PLAYBACK_SPEED = 1, -- realtime multiplier
+	LOG_LINES = 8,
 	FOLDER = "TASLite",
 	FILE_NAME = "Replay.json",
 }
@@ -51,6 +53,9 @@ local QUICK_CP_NAME = "quick"
 
 local playbackSpeed = CONFIG.PLAYBACK_SPEED
 local playbackAccumulator = 0
+local lastTrimmedCount = 0
+local logLines = {}
+local logLabel
 
 local playbackState = {
 	active = false,
@@ -65,8 +70,26 @@ local recordFreezeState = {
 	anchored = nil,
 }
 
+local function redrawLogLabel()
+	if not logLabel then
+		return
+	end
+	logLabel.Text = table.concat(logLines, "\n")
+end
+
+local function clearLog()
+	logLines = {}
+	redrawLogLabel()
+end
+
 local function log(msg)
-	print("[TAS Lite] " .. tostring(msg))
+	local line = tostring(msg)
+	print("[TAS Lite] " .. line)
+	table.insert(logLines, line)
+	while #logLines > CONFIG.LOG_LINES do
+		table.remove(logLines, 1)
+	end
+	redrawLogLabel()
 end
 
 local function round(n, digits)
@@ -293,12 +316,15 @@ local function applyFrame(i)
 end
 
 local function statusText()
+	local recordFreezeText = (mode == "record" and frozen and "ON") or "OFF"
 	return string.format(
-		"Mode: %s | Frozen: %s | Frame: %d/%d | RecordMode: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  R/T Seek  C/V Checkpoint  / Command  U UI",
+		"Mode: %s | Frozen: %s | RecFreeze: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  R/T Seek  C/V Checkpoint  / Command  U UI",
 		mode,
 		tostring(frozen),
+		recordFreezeText,
 		playIndex,
 		#frames,
+		lastTrimmedCount,
 		recordMode,
 		seekSpeed,
 		playbackSpeed
@@ -312,7 +338,7 @@ gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = false
 
 local label = Instance.new("TextLabel")
-label.Size = UDim2.fromOffset(760, 100)
+label.Size = UDim2.fromOffset(760, 120)
 label.Position = UDim2.fromOffset(12, 12)
 label.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 label.BackgroundTransparency = 0.25
@@ -326,7 +352,7 @@ label.Parent = gui
 
 local commandBar = Instance.new("TextBox")
 commandBar.Size = UDim2.fromOffset(760, 30)
-commandBar.Position = UDim2.fromOffset(12, 120)
+commandBar.Position = UDim2.fromOffset(12, 138)
 commandBar.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 commandBar.BackgroundTransparency = 0.25
 commandBar.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -337,6 +363,20 @@ commandBar.TextSize = 16
 commandBar.ClearTextOnFocus = false
 commandBar.Text = ""
 commandBar.Parent = gui
+
+logLabel = Instance.new("TextLabel")
+logLabel.Size = UDim2.fromOffset(760, 170)
+logLabel.Position = UDim2.fromOffset(12, 174)
+logLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+logLabel.BackgroundTransparency = 0.35
+logLabel.TextColor3 = Color3.fromRGB(175, 255, 175)
+logLabel.TextXAlignment = Enum.TextXAlignment.Left
+logLabel.TextYAlignment = Enum.TextYAlignment.Top
+logLabel.Font = Enum.Font.Code
+logLabel.TextSize = 14
+logLabel.TextWrapped = false
+logLabel.Text = ""
+logLabel.Parent = gui
 
 local function getUIParent()
 	if gethui then
@@ -411,12 +451,16 @@ end
 local function trimFutureFrames()
 	local current = clampIndex(playIndex)
 	if current >= #frames then
-		return
+		lastTrimmedCount = 0
+		return 0
 	end
+	local trimmed = #frames - current
 	for i = #frames, current + 1, -1 do
 		frames[i] = nil
 	end
-	log("Trimmed replay to frame " .. tostring(current))
+	lastTrimmedCount = trimmed
+	log("Trimmed " .. tostring(trimmed) .. " frame(s), now at frame " .. tostring(current))
+	return trimmed
 end
 
 local function setFrozen(newFrozen)
@@ -455,6 +499,7 @@ local function startRecord()
 		frames = {}
 		checkpoints = {}
 		playIndex = 1
+		lastTrimmedCount = 0
 	else
 		playIndex = math.max(1, #frames)
 	end
@@ -481,6 +526,7 @@ local function startPlay()
 	setFrozen(false)
 	seekDir = 0
 	playIndex = 1
+	lastTrimmedCount = 0
 	playbackAccumulator = 0
 	setCameraPlaybackMode(true)
 	applyPlaybackLock()
@@ -503,7 +549,7 @@ end
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.4",
+		version = "0.5",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
@@ -536,6 +582,7 @@ local function loadReplay()
 	frames = normalized
 	checkpoints = type(data.checkpoints) == "table" and data.checkpoints or {}
 	playIndex = 1
+	lastTrimmedCount = 0
 	log("Loaded replay. Frames: " .. tostring(#frames))
 end
 
@@ -561,6 +608,8 @@ local function commandHelp()
 	log("setspeed <number>")
 	log("playspeed <number>")
 	log("recordmode <replace|append>")
+	log("status")
+	log("clearlog")
 	log("cp set <name> [frame]")
 	log("cp goto <name>")
 	log("cp list")
@@ -616,6 +665,17 @@ local function runCommand(raw)
 		end
 		recordMode = newMode
 		log("Record mode set to " .. recordMode)
+		return
+	end
+
+	if cmd == "status" then
+		log(statusText())
+		return
+	end
+
+	if cmd == "clearlog" then
+		clearLog()
+		log("On-screen log cleared")
 		return
 	end
 
@@ -824,7 +884,7 @@ player.CharacterAdded:Connect(function()
 	end
 end)
 
-log("Loaded v0.4. PlaceId: " .. tostring(game.PlaceId))
+log("Loaded v0.5. PlaceId: " .. tostring(game.PlaceId))
 log("Playback hotkey moved to F10")
 log("Type '/' to open command bar, then use 'help'")
 updateUI()
