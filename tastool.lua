@@ -1,5 +1,6 @@
 --[[
-TAS Lite v0.7.1 (Roblox, LocalScript/executor)
+TAS Lite v0.7.2 (Roblox Script)
+Made by Tisor with codex
 - Stable record/playback timing
 - Freeze/seek with safe frame indexing
 - Checkpoints + append recording mode
@@ -305,6 +306,7 @@ local function normalizeFrame(rawFrame)
 			root = rawFrame.root,
 			vel = rawFrame.vel or { 0, 0, 0 },
 			cam = rawFrame.cam,
+			cam_local = rawFrame.cam_local,
 			fov = tonumber(rawFrame.fov) or 70,
 			shiftlock = (rawFrame.shiftlock == true),
 			keys = type(rawFrame.keys) == "table" and rawFrame.keys or {},
@@ -379,7 +381,16 @@ local function applyFrame(i)
 		end
 	end
 	if shouldReplayDriveCamera() then
-		camera.CFrame = camCF
+		if playbackMode == "physics" and not frozen then
+			local camLocalCF = tableToCf(frame.cam_local)
+			if camLocalCF then
+				camera.CFrame = hrp.CFrame * camLocalCF
+			else
+				camera.CFrame = camCF
+			end
+		else
+			camera.CFrame = camCF
+		end
 	end
 	camera.FieldOfView = tonumber(frame.fov) or 70
 	return true
@@ -512,6 +523,8 @@ local function captureFrame(dt)
 		root = roundArray(cfToTable(hrp.CFrame), CONFIG.ROUND_DIGITS),
 		vel = roundArray(v3ToTable(hrp.AssemblyLinearVelocity), CONFIG.ROUND_DIGITS),
 		cam = roundArray(cfToTable(camera.CFrame), CONFIG.ROUND_DIGITS),
+		-- Relative camera offset improves physics-mode camera/player alignment.
+		cam_local = roundArray(cfToTable(hrp.CFrame:ToObjectSpace(camera.CFrame)), CONFIG.ROUND_DIGITS),
 		fov = round(camera.FieldOfView, CONFIG.ROUND_DIGITS),
 		shiftlock = isShiftLockActive(),
 		keys = keysSnapshot(),
@@ -634,7 +647,7 @@ end
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.7.1",
+		version = "0.7.2",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
@@ -1000,7 +1013,7 @@ player.CharacterAdded:Connect(function()
 	end
 end)
 
-log("Loaded v0.7.1. PlaceId: " .. tostring(game.PlaceId))
+log("Loaded v0.7.2. PlaceId: " .. tostring(game.PlaceId))
 log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics')")
 log("Playback hotkey moved to F10")
 log("Press F2 to force hide/show GUI")
