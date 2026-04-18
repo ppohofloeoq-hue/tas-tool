@@ -1,10 +1,11 @@
 --[[
-TAS Lite v0.6 (Roblox, LocalScript/executor)
+TAS Lite v0.7 (Roblox, LocalScript/executor)
 - Stable record/playback timing
 - Freeze/seek with safe frame indexing
 - Checkpoints + append recording mode
 - Save/load JSON (backward compatible with v0.1/v0.2 frames)
 - On-screen log + record freeze/trim indicators
+- Playback mode: ghost (exact) or physics (with collisions)
 
 Hotkeys:
 F8  - start/stop record
@@ -26,6 +27,10 @@ local CONFIG = {
 	DEFAULT_FRAME_DT = 1 / 60,
 	SEEK_SPEED = 1, -- frames per render step while holding R/T
 	PLAYBACK_SPEED = 1, -- realtime multiplier
+	PLAYBACK_MODE = "physics", -- "ghost" | "physics"
+	PHYSICS_LERP_DISTANCE = 1.5,
+	PHYSICS_SNAP_DISTANCE = 8,
+	PHYSICS_LERP_ALPHA = 0.35,
 	LOG_LINES = 8,
 	FOLDER = "TASLite",
 	FILE_NAME = "Replay.json",
@@ -52,6 +57,7 @@ local checkpoints = {}
 local QUICK_CP_NAME = "quick"
 
 local playbackSpeed = CONFIG.PLAYBACK_SPEED
+local playbackMode = CONFIG.PLAYBACK_MODE
 local playbackAccumulator = 0
 local lastTrimmedCount = 0
 local logLines = {}
@@ -197,7 +203,11 @@ local function applyPlaybackLock()
 	hum.WalkSpeed = 0
 	hum.JumpPower = 0
 	hum.AutoRotate = false
-	hrp.Anchored = true
+	if playbackMode == "ghost" then
+		hrp.Anchored = true
+	else
+		hrp.Anchored = false
+	end
 	return true
 end
 
@@ -308,8 +318,19 @@ local function applyFrame(i)
 		return false
 	end
 
-	hrp.CFrame = rootCF
-	hrp.AssemblyLinearVelocity = tableToV3(frame.vel)
+	if playbackMode == "ghost" then
+		hrp.CFrame = rootCF
+		hrp.AssemblyLinearVelocity = tableToV3(frame.vel)
+	else
+		local targetVel = tableToV3(frame.vel)
+		hrp.AssemblyLinearVelocity = targetVel
+		local dist = (hrp.Position - rootCF.Position).Magnitude
+		if dist > CONFIG.PHYSICS_SNAP_DISTANCE then
+			hrp.CFrame = rootCF
+		elseif dist > CONFIG.PHYSICS_LERP_DISTANCE then
+			hrp.CFrame = hrp.CFrame:Lerp(rootCF, CONFIG.PHYSICS_LERP_ALPHA)
+		end
+	end
 	camera.CFrame = camCF
 	camera.FieldOfView = tonumber(frame.fov) or 70
 	return true
@@ -318,7 +339,7 @@ end
 local function statusText()
 	local recordFreezeText = (mode == "record" and frozen and "ON") or "OFF"
 	return string.format(
-		"Mode: %s | Frozen: %s | RecFreeze: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  R/T Seek  C/V Checkpoint  / Command  U UI",
+		"Mode: %s | Frozen: %s | RecFreeze: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  R/T Seek  C/V Checkpoint  / Command  U UI",
 		mode,
 		tostring(frozen),
 		recordFreezeText,
@@ -326,6 +347,7 @@ local function statusText()
 		#frames,
 		lastTrimmedCount,
 		recordMode,
+		playbackMode,
 		seekSpeed,
 		playbackSpeed
 	)
@@ -557,7 +579,7 @@ end
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.6",
+		version = "0.7",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
@@ -615,6 +637,7 @@ local function commandHelp()
 	log("erase")
 	log("setspeed <number>")
 	log("playspeed <number>")
+	log("playbackmode <ghost|physics>")
 	log("recordmode <replace|append>")
 	log("status")
 	log("clearlog")
@@ -662,6 +685,20 @@ local function runCommand(raw)
 		end
 		playbackSpeed = newSpeed
 		log("Playback speed set to " .. tostring(playbackSpeed))
+		return
+	end
+
+	if cmd == "playbackmode" then
+		local newMode = string.lower(args[2] or "")
+		if newMode ~= "ghost" and newMode ~= "physics" then
+			log("Usage: playbackmode <ghost|physics>")
+			return
+		end
+		playbackMode = newMode
+		if mode == "play" then
+			applyPlaybackLock()
+		end
+		log("Playback mode set to " .. playbackMode)
 		return
 	end
 
@@ -898,7 +935,8 @@ player.CharacterAdded:Connect(function()
 	end
 end)
 
-log("Loaded v0.6. PlaceId: " .. tostring(game.PlaceId))
+log("Loaded v0.7. PlaceId: " .. tostring(game.PlaceId))
+log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics')")
 log("Playback hotkey moved to F10")
 log("Type '/' to open command bar, then use 'help'")
 updateUI()
