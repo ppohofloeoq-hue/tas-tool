@@ -1,5 +1,5 @@
 --[[
-TAS Lite v0.3 (Roblox, LocalScript/executor)
+TAS Lite v0.4 (Roblox, LocalScript/executor)
 - Stable record/playback timing
 - Freeze/seek with safe frame indexing
 - Checkpoints + append recording mode
@@ -7,16 +7,16 @@ TAS Lite v0.3 (Roblox, LocalScript/executor)
 
 Hotkeys:
 F8  - start/stop record
-F9  - start/stop playback
+F10 - start/stop playback
 F6  - save replay to file
 F7  - load replay from file
-E   - freeze/unfreeze (during playback)
-F   - previous frame (when frozen)
-G   - next frame (when frozen)
-R/T - hold to seek backward/forward (when frozen)
+E   - freeze/unfreeze (during record/playback)
+F   - previous frame (when frozen, record/playback)
+G   - next frame (when frozen, record/playback)
+R/T - hold to seek backward/forward (when frozen, record/playback)
 U   - toggle status UI
-C   - set quick checkpoint
-V   - goto quick checkpoint
+C   - set quick checkpoint (record/playback)
+V   - goto quick checkpoint (record/playback)
 Slash (/) - focus command bar
 ]]
 
@@ -57,6 +57,12 @@ local playbackState = {
 	humanoid = nil,
 	hrp = nil,
 	saved = nil,
+}
+
+local recordFreezeState = {
+	active = false,
+	hrp = nil,
+	anchored = nil,
 }
 
 local function log(msg)
@@ -196,6 +202,37 @@ local function clearPlaybackLock()
 	playbackState.saved = nil
 end
 
+local function applyRecordFreezeLock()
+	local _, hrp = humanoidAndRoot()
+	if not hrp then
+		return false
+	end
+
+	if not recordFreezeState.active then
+		recordFreezeState.active = true
+		recordFreezeState.hrp = hrp
+		recordFreezeState.anchored = hrp.Anchored
+	end
+
+	hrp.Anchored = true
+	return true
+end
+
+local function clearRecordFreezeLock()
+	if not recordFreezeState.active then
+		return
+	end
+
+	local hrp = recordFreezeState.hrp
+	if hrp and hrp.Parent then
+		hrp.Anchored = recordFreezeState.anchored == true
+	end
+
+	recordFreezeState.active = false
+	recordFreezeState.hrp = nil
+	recordFreezeState.anchored = nil
+end
+
 local function normalizeFrame(rawFrame)
 	if type(rawFrame) ~= "table" then
 		return nil
@@ -257,7 +294,7 @@ end
 
 local function statusText()
 	return string.format(
-		"Mode: %s | Frozen: %s | Frame: %d/%d | RecordMode: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F9 Play  F6 Save  F7 Load  E Freeze  F/G Step  R/T Seek  C/V Checkpoint  / Command  U UI",
+		"Mode: %s | Frozen: %s | Frame: %d/%d | RecordMode: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  R/T Seek  C/V Checkpoint  / Command  U UI",
 		mode,
 		tostring(frozen),
 		playIndex,
@@ -371,12 +408,47 @@ local function captureFrame(dt)
 	playIndex = #frames
 end
 
+local function trimFutureFrames()
+	local current = clampIndex(playIndex)
+	if current >= #frames then
+		return
+	end
+	for i = #frames, current + 1, -1 do
+		frames[i] = nil
+	end
+	log("Trimmed replay to frame " .. tostring(current))
+end
+
+local function setFrozen(newFrozen)
+	if frozen == newFrozen then
+		return
+	end
+
+	if mode == "record" then
+		if newFrozen then
+			if #frames > 0 then
+				playIndex = clampIndex(playIndex)
+			else
+				playIndex = 1
+			end
+			applyRecordFreezeLock()
+		else
+			trimFutureFrames()
+			clearRecordFreezeLock()
+			playIndex = #frames
+		end
+	end
+
+	frozen = newFrozen
+end
+
 local function startRecord()
 	mode = "record"
-	frozen = false
+	setFrozen(false)
 	seekDir = 0
 	playbackAccumulator = 0
 	clearPlaybackLock()
+	clearRecordFreezeLock()
 	setCameraPlaybackMode(false)
 
 	if recordMode == "replace" then
@@ -394,6 +466,8 @@ local function stopRecord()
 	if mode ~= "record" then
 		return
 	end
+	setFrozen(false)
+	clearRecordFreezeLock()
 	mode = "idle"
 	log("Recording stopped. Frames: " .. tostring(#frames))
 end
@@ -404,7 +478,7 @@ local function startPlay()
 		return
 	end
 	mode = "play"
-	frozen = false
+	setFrozen(false)
 	seekDir = 0
 	playIndex = 1
 	playbackAccumulator = 0
@@ -418,7 +492,7 @@ local function stopPlay()
 		return
 	end
 	mode = "idle"
-	frozen = false
+	setFrozen(false)
 	seekDir = 0
 	playbackAccumulator = 0
 	clearPlaybackLock()
@@ -429,7 +503,7 @@ end
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.3",
+		version = "0.4",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
@@ -469,11 +543,12 @@ local function eraseReplay()
 	frames = {}
 	checkpoints = {}
 	playIndex = 1
-	frozen = false
+	setFrozen(false)
 	seekDir = 0
 	mode = "idle"
 	playbackAccumulator = 0
 	clearPlaybackLock()
+	clearRecordFreezeLock()
 	setCameraPlaybackMode(false)
 	saveReplay()
 	log("Replay erased")
@@ -612,7 +687,7 @@ UIS.InputBegan:Connect(function(input, gp)
 		else
 			startRecord()
 		end
-	elseif kc == Enum.KeyCode.F9 then
+	elseif kc == Enum.KeyCode.F10 then
 		if mode == "play" then
 			stopPlay()
 		else
@@ -625,25 +700,25 @@ UIS.InputBegan:Connect(function(input, gp)
 	elseif kc == Enum.KeyCode.U then
 		uiVisible = not uiVisible
 	elseif kc == Enum.KeyCode.E then
-		if mode == "play" then
-			frozen = not frozen
+		if mode == "play" or mode == "record" then
+			setFrozen(not frozen)
 		end
 	elseif kc == Enum.KeyCode.F then
-		if mode == "play" and frozen then
+		if (mode == "play" or mode == "record") and frozen then
 			playIndex = clampIndex(playIndex - 1)
 			applyFrame(playIndex)
 		end
 	elseif kc == Enum.KeyCode.G then
-		if mode == "play" and frozen then
+		if (mode == "play" or mode == "record") and frozen then
 			playIndex = clampIndex(playIndex + 1)
 			applyFrame(playIndex)
 		end
 	elseif kc == Enum.KeyCode.R then
-		if mode == "play" and frozen then
+		if (mode == "play" or mode == "record") and frozen then
 			seekDir = -1
 		end
 	elseif kc == Enum.KeyCode.T then
-		if mode == "play" and frozen then
+		if (mode == "play" or mode == "record") and frozen then
 			seekDir = 1
 		end
 	elseif kc == Enum.KeyCode.C then
@@ -677,7 +752,20 @@ end)
 
 RunService.RenderStepped:Connect(function(dt)
 	if mode == "record" then
-		captureFrame(dt)
+		if frozen then
+			applyRecordFreezeLock()
+			if #frames > 0 then
+				if seekDir ~= 0 then
+					playIndex = clampIndex(playIndex + seekDir * seekSpeed)
+				else
+					playIndex = clampIndex(playIndex)
+				end
+				applyFrame(playIndex)
+			end
+		else
+			clearRecordFreezeLock()
+			captureFrame(dt)
+		end
 	elseif mode == "play" then
 		if #frames == 0 then
 			stopPlay()
@@ -736,6 +824,7 @@ player.CharacterAdded:Connect(function()
 	end
 end)
 
-log("Loaded v0.3. PlaceId: " .. tostring(game.PlaceId))
+log("Loaded v0.4. PlaceId: " .. tostring(game.PlaceId))
+log("Playback hotkey moved to F10")
 log("Type '/' to open command bar, then use 'help'")
 updateUI()
