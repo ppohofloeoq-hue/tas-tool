@@ -2,13 +2,14 @@
 By plusgiant5
 Some code taken from original Replayability so credit to dong too
 
-Tasability V1.2 - no AHK / safer playback version
+Tasability V1.2 - no AHK / safer playback / no ContextActionService CallFunction
 Modified:
 - Removed AHK dependency
 - Disabled mouse wheel recording/playback
 - Added safe checks for input functions
 - Added pcall around replay reading loop
 - SaveToFile now merges RecordingTable before writing
+- Removed blocked ContextActionService:CallFunction usage
 - Fixed some small issues
 ]]
 
@@ -53,7 +54,7 @@ local Cursors = {
 }
 
 -- Constants
-local Version = "V1.2 NoAHK Safe"
+local Version = "V1.2 NoAHK Safe NoCAS"
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
@@ -1405,15 +1406,13 @@ do
 		return ShiftLockEnabled
 	end
 
+	-- IMPORTANT: no ContextActionService:CallFunction here
 	SetShiftLockEnabled = function(Enabled)
-		if ShiftLockEnabled ~= Enabled then
-			ShiftLockEnabled = Enabled
-			if Enabled then
-				SetCursor("MouseLockedCursor")
-			else
-				SetCursor("ArrowFarCursor")
-			end
-			ContextActionService:CallFunction("MouseLockSwitchAction", Enum.UserInputState.Begin, game)
+		ShiftLockEnabled = Enabled
+		if Enabled then
+			SetCursor("MouseLockedCursor")
+		else
+			SetCursor("ArrowFarCursor")
 		end
 	end
 
@@ -2063,12 +2062,13 @@ spawn(function()
 				end
 
 				pcall(setAnimationSpeed,AnimationSpeed)
-
-				if FrameShiftLockEnabled then
-					SetShiftLockEnabled(true)
-				else
-					SetShiftLockEnabled(false)
-				end
+				pcall(function()
+					if FrameShiftLockEnabled then
+						SetShiftLockEnabled(true)
+					else
+						SetShiftLockEnabled(false)
+					end
+				end)
 
 				if has_mousemoveabs then
 					if PlaybackMouseLocation and not FrameShiftLockEnabled and Zoom > 0.52 then
