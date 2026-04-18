@@ -1,957 +1,2347 @@
-local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
-local ContextActionService = game:GetService("ContextActionService")
+--[[
+By plusgiant5
+Some code taken from original Replayability so credit to dong too
 
-local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
-local camera = Workspace.CurrentCamera
+Tasability V1.2 - no AHK version
+Modified to remove AHK dependency
+Mouse wheel recording/playback disabled
+Fixed a few small issues
+]]
 
-local character
-local humanoid
-local rootPart
+-- Config
+local PlaybackInputs = true
+local PlaybackMouseLocation = false
+local RoundDigits = 3
+local ReplayStartTime = 3
+local FrameBacktrackCount = 500
+local MinimumJSONFPS = 1/10
+local BypassAntiExploit = false
 
-local function bindCharacter(char)
-	character = char
-	humanoid = char:WaitForChild("Humanoid")
-	rootPart = char:WaitForChild("HumanoidRootPart")
-end
+-- Advanced config
 
-bindCharacter(player.Character or player.CharacterAdded:Wait())
-player.CharacterAdded:Connect(bindCharacter)
-
-local function hasCharacter()
-	return character and character.Parent and humanoid and humanoid.Parent and rootPart and rootPart.Parent
-end
-
-local function clamp(n, a, b)
-	return math.max(a, math.min(b, n))
-end
-
-local function deepCopy(tbl)
-	local out = {}
-	for k, v in pairs(tbl) do
-		if type(v) == "table" then
-			out[k] = deepCopy(v)
-		else
-			out[k] = v
-		end
-	end
-	return out
-end
-
-local function cframeToTable(cf)
-	return {cf:GetComponents()}
-end
-
-local function tableToCFrame(tbl)
-	return CFrame.new(unpack(tbl))
-end
-
-local function vector3ToTable(v)
-	return {v.X, v.Y, v.Z}
-end
-
-local function tableToVector3(tbl)
-	if not tbl then
-		return Vector3.zero
-	end
-	return Vector3.new(tbl[1] or 0, tbl[2] or 0, tbl[3] or 0)
-end
-
-local function vector2ToTable(v)
-	return {v.X, v.Y}
-end
-
-local function getMouseBehaviorName()
-	return UserInputService.MouseBehavior.Name
-end
-
-local function mouseBehaviorFromName(name)
-	if name == "LockCenter" then
-		return Enum.MouseBehavior.LockCenter
-	elseif name == "LockCurrentPosition" then
-		return Enum.MouseBehavior.LockCurrentPosition
-	else
-		return Enum.MouseBehavior.Default
-	end
-end
-
-local function getCameraModeName()
-	return player.CameraMode.Name
-end
-
-local function cameraModeFromName(name)
-	if name == "LockFirstPerson" then
-		return Enum.CameraMode.LockFirstPerson
-	end
-	return Enum.CameraMode.Classic
-end
-
-local function getHumanoidStateName()
-	if not humanoid then
-		return "Running"
-	end
-	return humanoid:GetState().Name
-end
-
-local function humanoidStateFromName(name)
-	if name == "Freefall" then
-		return Enum.HumanoidStateType.Freefall
-	elseif name == "Jumping" then
-		return Enum.HumanoidStateType.Jumping
-	elseif name == "Landed" then
-		return Enum.HumanoidStateType.Landed
-	elseif name == "Climbing" then
-		return Enum.HumanoidStateType.Climbing
-	elseif name == "Swimming" then
-		return Enum.HumanoidStateType.Swimming
-	elseif name == "Seated" then
-		return Enum.HumanoidStateType.Seated
-	elseif name == "PlatformStanding" then
-		return Enum.HumanoidStateType.PlatformStanding
-	else
-		return Enum.HumanoidStateType.Running
-	end
-end
-
-local frames = {}
-
-local state = {
-	mode = "idle", -- idle, recording, replay
-	frame = 1,
-	uiVisible = true,
-	playOneFrame = false,
-	isPlaying = false,
+local InputBlacklist = {
+	["R"] = true;
+	["T"] = true;
+	["F"] = true;
+	["G"] = true;
+	["E"] = true;
 }
 
-local holdBack = false
-local holdForward = false
-local nextRepeatAt = 0
+local ColorCodes = {
+	WaitingForInput = Color3.new(1,1,0);
+	Recording = Color3.new(1,0,0);
+	Reading = Color3.new(0,0,1);
+	Idle = Color3.new(1,1,1);
+	Frozen = Color3.new(0,1,1);
 
-local firstRepeatDelay = 0.08
-local repeatDelay = 0.035
-local fastScrubStep = 1
+	None = Color3.new(0,0,0);
+}
 
-local recordConn = nil
-local replayConn = nil
-local scrubConn = nil
+local Cursors = {
+	["ArrowFarCursor"] = {
+		Icon = "rbxasset://textures/Cursors/KeyboardMouse/ArrowFarCursor.png";
+		Size = UDim2.fromOffset(64,64);
+		Offset = Vector2.new(-32,4);
+	};
+	["MouseLockedCursor"] = {
+		Icon = "rbxasset://textures/MouseLockedCursor.png";
+		Size = UDim2.fromOffset(32,32);
+		Offset = Vector2.new(-16,20);
+	};
+}
 
-local savedCameraType = nil
-local savedCameraSubject = nil
-local savedFieldOfView = nil
-local savedAutoRotate = nil
-local savedCameraOffset = nil
-local savedMouseBehavior = nil
-local savedCameraMode = nil
-local savedShiftLock = nil
+-- Constants
+local Version = "V1.2 NoAHK"
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+local ContextActionService = game:GetService("ContextActionService")
+local GuiService = game:GetService("GuiService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local Player = game.Players.LocalPlayer
+local Mouse = Player:GetMouse()
+local random = math.random
+local min = math.min
+local max = math.max
+local floor = math.floor
+local ceil = math.ceil
+local ReplayFileBeginning = "{\"Replay\":"
+local ReplayFileEnding = "}"
+local PlayerModule = Player.PlayerScripts:WaitForChild("PlayerModule")
+local ShiftLockBoundKeys = PlayerModule:WaitForChild("CameraModule"):WaitForChild("MouseLockController"):WaitForChild("BoundKeys")
+local ShiftLockEnabled = false
+local GuiInset = GuiService:GetGuiInset()
 
-local currentKeysDown = {}
-local currentMouseButtonsDown = {}
-local currentMouseDelta = Vector2.zero
-local currentMouseWheel = 0
+-- Variables
+local ExecutionTick = tick()
+local PlaceId = game.PlaceId
+local Character = nil
+local Humanoid = nil
+local RootPart = nil
+local DefaultGravity = nil
+local DefaultJumpPower = nil
+local DefaultWalkSpeed = nil
+local Resolution = nil
+local ConsoleMessage = print
+local Reading = false
+local Writing = false
+local Saving = false
+local AnimateDisabled = false
+local Checkpoints = {}
+local RenderSteppedConnections = {}
+local SteppedConnections = {}
+local FolderPath = "Tasability/"..tostring(PlaceId)
+local ReplayPath = FolderPath.."/Replay.json"
+local ReplayTable = {}
+local RecordingTable = {}
+local ReplayTableIndex = 0
+local AnimationQueue = {}
+local RunSpeed = 0
+local ClimbSpeed = 0
+local HumanoidStateQueue = {}
+local InputBeganQueue = {}
+local InputEndedQueue = {}
+local Cursor = Instance.new("ImageLabel")
+local CursorIcon = nil
+local CursorSize = nil
+local CursorOffset = nil
+local Dead = false
+local CameraCFrame = workspace.CurrentCamera.CFrame
+local Pressed = {}
+local IgnoreGameProcessed = false
 
--- =========================
--- Custom ShiftLock
--- =========================
-local SHIFTLOCK_ACTION = "TAS_CustomShiftLockToggle"
-local SHIFTLOCK_OFFSET = Vector3.new(1.75, 0.25, 0)
-local isShiftLocked = false
+local Frozen = false
+local FreezeFrame = 1
+local SeekDirection = 0
+local SeekDirectionMultiplier = 1
 
-local function setShiftLock(enabled)
-	isShiftLocked = enabled == true
+local InputCodes = {
+	["A"] = 0x41;
+	["B"] = 0x42;
+	["C"] = 0x43;
+	["D"] = 0x44;
+	["E"] = 0x45;
+	["F"] = 0x46;
+	["G"] = 0x47;
+	["H"] = 0x48;
+	["I"] = 0x49;
+	["J"] = 0x4A;
+	["K"] = 0x4B;
+	["L"] = 0x4C;
+	["M"] = 0x4D;
+	["N"] = 0x4E;
+	["O"] = 0x4F;
+	["P"] = 0x50;
+	["Q"] = 0x51;
+	["R"] = 0x52;
+	["S"] = 0x53;
+	["T"] = 0x54;
+	["U"] = 0x55;
+	["V"] = 0x56;
+	["W"] = 0x57;
+	["X"] = 0x58;
+	["Y"] = 0x59;
+	["Z"] = 0x5A;
+	["Space"] = 0x20;
+	["LeftShift"] = 0x10;
+	["RightShift"] = 0x10;
+}
 
-	if not hasCharacter() then
-		return
+mouse1press = mouse1press or mouse1down
+mouse2press = mouse2press or mouse2down
+mouse1release = mouse1release or mouse1up
+mouse2release = mouse2release or mouse2up
+keypress = keypress or keydown
+keyrelease = keyrelease or keyup
+
+local pose = "Standing"
+local currentAnimSpeed = 1.0
+
+local MainFrame = Instance.new("Frame")
+local ConsoleFrame = Instance.new("Frame")
+local ConsoleMessageLabel = Instance.new("TextLabel")
+local ConsoleListLayout = Instance.new("UIListLayout")
+local SaveToFileButton = Instance.new("TextButton")
+local IdleButton = Instance.new("TextButton")
+local IgnoreGameProcessedButton = Instance.new("TextButton")
+local CurrentPlaceIdButton = Instance.new("TextButton")
+local ReadButton = Instance.new("TextButton")
+local SaveFileInfoLabel = Instance.new("TextLabel")
+local RecordedFramesLabel = Instance.new("TextLabel")
+local PressedKeysLabel = Instance.new("TextLabel")
+local WritingPressedKeysLabel = Instance.new("TextLabel")
+local ConnectedLabel = Instance.new("TextLabel")
+local ColorCodeFrame = Instance.new("TextLabel")
+local CommandBar = Instance.new("TextBox")
+
+local GUIParent
+if gethui then
+	while not gethui() do
+		RunService.RenderStepped:Wait()
 	end
-
-	if isShiftLocked then
-		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
-		humanoid.CameraOffset = SHIFTLOCK_OFFSET
-		humanoid.AutoRotate = true
+	GUIParent = gethui()
+else
+	if ({pcall(function() return #game.CoreGui:GetChildren() end)})[1] then
+		GUIParent = game.CoreGui
 	else
-		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-		humanoid.CameraOffset = Vector3.zero
+		GUIParent = Player:WaitForChild("PlayerGui")
 	end
 end
 
-local function toggleShiftLock()
-	setShiftLock(not isShiftLocked)
-end
-
-ContextActionService:BindAction(
-	SHIFTLOCK_ACTION,
-	function(_, inputState)
-		if inputState == Enum.UserInputState.Begin then
-			toggleShiftLock()
-		end
-		return Enum.ContextActionResult.Sink
-	end,
-	false,
-	Enum.KeyCode.LeftShift,
-	Enum.KeyCode.RightShift
-)
-
-RunService.RenderStepped:Connect(function()
-	if not hasCharacter() then
-		return
-	end
-
-	if isShiftLocked and state.mode ~= "replay" then
-		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
-
-		local look = camera.CFrame.LookVector
-		local flatLook = Vector3.new(look.X, 0, look.Z)
-
-		if flatLook.Magnitude > 0.001 then
-			rootPart.CFrame = CFrame.new(rootPart.Position, rootPart.Position + flatLook.Unit)
-		end
-	end
-end)
-
-player.CharacterAdded:Connect(function()
-	task.wait(0.1)
-	if isShiftLocked then
-		setShiftLock(true)
-	end
-end)
-
--- =========================
--- GUI
--- =========================
-local ui = Instance.new("ScreenGui")
-ui.Name = "TASGui"
-ui.ResetOnSpawn = false
-ui.Parent = playerGui
-
-local main = Instance.new("Frame")
-main.Size = UDim2.fromOffset(560, 360)
-main.Position = UDim2.fromOffset(20, 20)
-main.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-main.BackgroundTransparency = 0.06
-main.BorderSizePixel = 0
-main.Parent = ui
-
-local mainCorner = Instance.new("UICorner")
-mainCorner.CornerRadius = UDim.new(0, 12)
-mainCorner.Parent = main
-
-local mainStroke = Instance.new("UIStroke")
-mainStroke.Color = Color3.fromRGB(80, 80, 80)
-mainStroke.Thickness = 1
-mainStroke.Parent = main
-
-local title = Instance.new("TextLabel")
-title.BackgroundTransparency = 1
-title.Position = UDim2.fromOffset(12, 8)
-title.Size = UDim2.new(1, -24, 0, 28)
-title.Font = Enum.Font.SourceSansBold
-title.TextSize = 26
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.TextColor3 = Color3.fromRGB(255, 255, 255)
-title.Text = "TAS Tool v3"
-title.Parent = main
-
-local statusLabel = Instance.new("TextLabel")
-statusLabel.BackgroundTransparency = 1
-statusLabel.Position = UDim2.fromOffset(12, 38)
-statusLabel.Size = UDim2.new(1, -24, 0, 24)
-statusLabel.Font = Enum.Font.SourceSansBold
-statusLabel.TextSize = 20
-statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-statusLabel.TextColor3 = Color3.fromRGB(180, 255, 180)
-statusLabel.Text = "Статус: ожидание"
-statusLabel.Parent = main
-
-local controlsLabel = Instance.new("TextLabel")
-controlsLabel.BackgroundTransparency = 1
-controlsLabel.Position = UDim2.fromOffset(12, 68)
-controlsLabel.Size = UDim2.new(1, -24, 0, 200)
-controlsLabel.Font = Enum.Font.SourceSans
-controlsLabel.TextSize = 19
-controlsLabel.TextXAlignment = Enum.TextXAlignment.Left
-controlsLabel.TextYAlignment = Enum.TextYAlignment.Top
-controlsLabel.TextWrapped = true
-controlsLabel.TextColor3 = Color3.fromRGB(235, 235, 235)
-controlsLabel.Text =
-	"Shift = кастомный shiftlock\n" ..
-	"J = запись с нуля / стоп\n" ..
-	"N = replay с 1 кадра\n" ..
-	"E = перезаписать с текущего кадра\n" ..
-	"R/T = перемотка назад / вперёд\n" ..
-	"F = -1 кадр\n" ..
-	"V = проиграть 1 следующий кадр\n" ..
-	"L = выйти из replay\n" ..
-	"Backspace = очистить запись\n" ..
-	"Frame + GO = перейти на кадр"
-controlsLabel.Parent = main
-
-local infoLabel = Instance.new("TextLabel")
-infoLabel.BackgroundTransparency = 1
-infoLabel.Position = UDim2.fromOffset(12, 270)
-infoLabel.Size = UDim2.new(1, -24, 0, 24)
-infoLabel.Font = Enum.Font.SourceSans
-infoLabel.TextSize = 19
-infoLabel.TextXAlignment = Enum.TextXAlignment.Left
-infoLabel.TextColor3 = Color3.fromRGB(255, 235, 170)
-infoLabel.Text = "Кадров: 0 | Текущий: 0"
-infoLabel.Parent = main
-
-local modeInfoLabel = Instance.new("TextLabel")
-modeInfoLabel.BackgroundTransparency = 1
-modeInfoLabel.Position = UDim2.fromOffset(12, 294)
-modeInfoLabel.Size = UDim2.new(1, -24, 0, 24)
-modeInfoLabel.Font = Enum.Font.SourceSans
-modeInfoLabel.TextSize = 18
-modeInfoLabel.TextXAlignment = Enum.TextXAlignment.Left
-modeInfoLabel.TextColor3 = Color3.fromRGB(190, 220, 255)
-modeInfoLabel.Text = "Режим: idle"
-modeInfoLabel.Parent = main
-
-local shiftInfoLabel = Instance.new("TextLabel")
-shiftInfoLabel.BackgroundTransparency = 1
-shiftInfoLabel.Position = UDim2.fromOffset(12, 318)
-shiftInfoLabel.Size = UDim2.new(1, -24, 0, 20)
-shiftInfoLabel.Font = Enum.Font.SourceSans
-shiftInfoLabel.TextSize = 18
-shiftInfoLabel.TextXAlignment = Enum.TextXAlignment.Left
-shiftInfoLabel.TextColor3 = Color3.fromRGB(180, 255, 220)
-shiftInfoLabel.Text = "ShiftLock: OFF"
-shiftInfoLabel.Parent = main
-
-local frameBox = Instance.new("TextBox")
-frameBox.ClearTextOnFocus = false
-frameBox.PlaceholderText = "Frame"
-frameBox.Size = UDim2.fromOffset(120, 32)
-frameBox.Position = UDim2.fromOffset(400, 300)
-frameBox.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-frameBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-frameBox.PlaceholderColor3 = Color3.fromRGB(160, 160, 160)
-frameBox.Font = Enum.Font.SourceSans
-frameBox.TextSize = 20
-frameBox.Parent = main
-
-local frameBoxCorner = Instance.new("UICorner")
-frameBoxCorner.CornerRadius = UDim.new(0, 8)
-frameBoxCorner.Parent = frameBox
-
-local goButton = Instance.new("TextButton")
-goButton.Size = UDim2.fromOffset(70, 32)
-goButton.Position = UDim2.fromOffset(486, 300)
-goButton.BackgroundColor3 = Color3.fromRGB(60, 110, 190)
-goButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-goButton.Font = Enum.Font.SourceSansBold
-goButton.TextSize = 20
-goButton.Text = "GO"
-goButton.Parent = main
-
-local goCorner = Instance.new("UICorner")
-goCorner.CornerRadius = UDim.new(0, 8)
-goCorner.Parent = goButton
-
-local timelineBack = Instance.new("Frame")
-timelineBack.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
-timelineBack.BorderSizePixel = 0
-timelineBack.Position = UDim2.new(0, 12, 1, -16)
-timelineBack.Size = UDim2.new(1, -24, 0, 8)
-timelineBack.Parent = main
-
-local timelineBackCorner = Instance.new("UICorner")
-timelineBackCorner.CornerRadius = UDim.new(1, 0)
-timelineBackCorner.Parent = timelineBack
-
-local timelineFill = Instance.new("Frame")
-timelineFill.BackgroundColor3 = Color3.fromRGB(100, 180, 255)
-timelineFill.BorderSizePixel = 0
-timelineFill.Size = UDim2.new(0, 0, 1, 0)
-timelineFill.Parent = timelineBack
-
-local timelineFillCorner = Instance.new("UICorner")
-timelineFillCorner.CornerRadius = UDim.new(1, 0)
-timelineFillCorner.Parent = timelineFill
-
-local function setTimelineProgress(alpha)
-	alpha = clamp(alpha, 0, 1)
-	timelineFill.Size = UDim2.new(alpha, 0, 1, 0)
-end
-
-local function updateGui()
-	local total = #frames
-	local current = clamp(state.frame, 0, math.max(total, 0))
-
-	infoLabel.Text = ("Кадров: %d | Текущий: %d"):format(total, current)
-	modeInfoLabel.Text = ("Режим: %s%s"):format(
-		state.mode,
-		state.mode == "replay" and (state.isPlaying and " (play)" or " (freeze)") or ""
-	)
-	shiftInfoLabel.Text = "ShiftLock: " .. (isShiftLocked and "ON" or "OFF")
-
-	if total <= 1 then
-		setTimelineProgress(0)
-	else
-		setTimelineProgress((current - 1) / (total - 1))
-	end
-
-	if state.mode == "idle" then
-		statusLabel.Text = "Статус: ожидание"
-		statusLabel.TextColor3 = Color3.fromRGB(180, 255, 180)
-	elseif state.mode == "recording" then
-		statusLabel.Text = "Статус: запись"
-		statusLabel.TextColor3 = Color3.fromRGB(120, 255, 120)
-	elseif state.mode == "replay" then
-		statusLabel.Text = state.isPlaying and "Статус: replay" or "Статус: freeze / seek"
-		statusLabel.TextColor3 = Color3.fromRGB(120, 210, 255)
-	end
-end
-
-local function saveEnvironment()
-	if not hasCharacter() then
-		return
-	end
-
-	savedCameraType = camera.CameraType
-	savedCameraSubject = camera.CameraSubject
-	savedFieldOfView = camera.FieldOfView
-	savedAutoRotate = humanoid.AutoRotate
-	savedCameraOffset = humanoid.CameraOffset
-	savedMouseBehavior = UserInputService.MouseBehavior
-	savedCameraMode = player.CameraMode
-	savedShiftLock = isShiftLocked
-end
-
-local function restoreEnvironment()
-	if savedCameraType then
-		camera.CameraType = savedCameraType
-	end
-	if savedCameraSubject then
-		camera.CameraSubject = savedCameraSubject
-	end
-	if savedFieldOfView then
-		camera.FieldOfView = savedFieldOfView
-	end
-	if savedAutoRotate ~= nil and humanoid then
-		humanoid.AutoRotate = savedAutoRotate
-	end
-	if savedCameraOffset and humanoid then
-		humanoid.CameraOffset = savedCameraOffset
-	end
-	if savedMouseBehavior then
-		UserInputService.MouseBehavior = savedMouseBehavior
-	end
-	if savedCameraMode then
-		player.CameraMode = savedCameraMode
-	end
-	if savedShiftLock ~= nil then
-		setShiftLock(savedShiftLock)
-	end
-end
-
-local function makeInputSnapshot()
-	local mouseDelta = currentMouseDelta
-	if UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter then
-		mouseDelta = UserInputService:GetMouseDelta()
-	end
-
-	return {
-		keysDown = deepCopy(currentKeysDown),
-		mouseButtonsDown = deepCopy(currentMouseButtonsDown),
-		mouseWheel = currentMouseWheel,
-		mouseDelta = vector2ToTable(mouseDelta),
-		mouseLocation = vector2ToTable(UserInputService:GetMouseLocation()),
-		mouseBehaviorName = getMouseBehaviorName(),
-		cameraModeName = getCameraModeName(),
-	}
-end
-
-local function makeFrame(dt)
-	return {
-		dt = dt,
-		rootCFrame = cframeToTable(rootPart.CFrame),
-		cameraCFrame = cframeToTable(camera.CFrame),
-		velocity = vector3ToTable(rootPart.AssemblyLinearVelocity),
-		angularVelocity = vector3ToTable(rootPart.AssemblyAngularVelocity),
-		cameraOffset = vector3ToTable(humanoid.CameraOffset),
-		moveDirection = vector3ToTable(humanoid.MoveDirection),
-		fieldOfView = camera.FieldOfView,
-		humanoidStateName = getHumanoidStateName(),
-		jump = humanoid.Jump,
-		walkSpeed = humanoid.WalkSpeed,
-		jumpPower = humanoid.JumpPower,
-		shiftLock = isShiftLocked,
-		input = makeInputSnapshot(),
-	}
-end
-
-local function applyShiftLockFromFrame(frame)
-	setShiftLock(frame.shiftLock == true)
-
-	if frame.shiftLock ~= true then
-		UserInputService.MouseBehavior = mouseBehaviorFromName(frame.input.mouseBehaviorName)
-	end
-
-	player.CameraMode = cameraModeFromName(frame.input.cameraModeName)
-end
-
-local function applyFrozenFrame(index)
-	if not hasCharacter() then
-		return
-	end
-
-	local frame = frames[index]
-	if not frame then
-		return
-	end
-
-	rootPart.Anchored = true
-	humanoid.AutoRotate = false
-
-	rootPart.CFrame = tableToCFrame(frame.rootCFrame)
-	rootPart.AssemblyLinearVelocity = tableToVector3(frame.velocity)
-	rootPart.AssemblyAngularVelocity = tableToVector3(frame.angularVelocity)
-
-	humanoid.CameraOffset = frame.shiftLock and SHIFTLOCK_OFFSET or tableToVector3(frame.cameraOffset)
-	humanoid.WalkSpeed = frame.walkSpeed or humanoid.WalkSpeed
-	humanoid.JumpPower = frame.jumpPower or humanoid.JumpPower
-	humanoid:ChangeState(humanoidStateFromName(frame.humanoidStateName))
-
-	applyShiftLockFromFrame(frame)
-
-	camera.CameraType = Enum.CameraType.Scriptable
-	camera.CFrame = tableToCFrame(frame.cameraCFrame)
-	camera.FieldOfView = frame.fieldOfView
-
-	state.frame = index
-	updateGui()
-end
-
-local function stopRecording()
-	if recordConn then
-		recordConn:Disconnect()
-		recordConn = nil
-	end
-	if state.mode == "recording" then
-		state.mode = "idle"
-	end
-	updateGui()
-end
-
-local function stopReplay()
-	if replayConn then
-		replayConn:Disconnect()
-		replayConn = nil
-	end
-
-	state.mode = "idle"
-	state.isPlaying = false
-	state.playOneFrame = false
-	holdBack = false
-	holdForward = false
-
-	if hasCharacter() then
-		rootPart.Anchored = false
-	end
-
-	restoreEnvironment()
-	updateGui()
-end
-
-local function startRecordingFresh()
-	if not hasCharacter() then
-		return
-	end
-
-	if state.mode == "replay" then
-		stopReplay()
-	end
-
-	frames = {}
-	state.frame = 1
-	state.mode = "recording"
-	state.isPlaying = false
-	state.playOneFrame = false
-
-	if recordConn then
-		recordConn:Disconnect()
-	end
-
-	recordConn = RunService.RenderStepped:Connect(function(dt)
-		if state.mode ~= "recording" or not hasCharacter() then
-			return
-		end
-
-		table.insert(frames, makeFrame(dt))
-		state.frame = #frames
-		currentMouseDelta = Vector2.zero
-		currentMouseWheel = 0
-		updateGui()
-	end)
-
-	updateGui()
-end
-
-local function ensureReplayMode(startFrame)
-	if #frames == 0 or not hasCharacter() then
-		return false
-	end
-
-	if state.mode == "recording" then
-		stopRecording()
-	end
-
-	if state.mode ~= "replay" then
-		saveEnvironment()
-	end
-
-	state.mode = "replay"
-	state.isPlaying = false
-	state.playOneFrame = false
-	state.frame = clamp(startFrame or state.frame or 1, 1, #frames)
-
-	applyFrozenFrame(state.frame)
-	return true
-end
-
-local function goToFrame(index)
-	if not ensureReplayMode(index) then
-		return
-	end
-	state.frame = clamp(index, 1, #frames)
-	applyFrozenFrame(state.frame)
-end
-
-local function stepFrame(delta)
-	if #frames == 0 then
-		return
-	end
-	goToFrame((state.frame or 1) + delta)
-end
-
-local function playOneNextFrame()
-	if state.mode ~= "replay" then
-		return
-	end
-	if #frames == 0 or state.frame >= #frames then
-		return
-	end
-
-	state.playOneFrame = true
-	state.isPlaying = true
-	updateGui()
-end
-
-local function overwriteFromCurrentFrame()
-	if #frames == 0 or not hasCharacter() then
-		return
-	end
-
-	local overwriteIndex = clamp(state.frame, 1, #frames)
-	local chosenFrame = frames[overwriteIndex]
-	if not chosenFrame then
-		return
-	end
-
-	if replayConn then
-		replayConn:Disconnect()
-		replayConn = nil
-	end
-
-	while #frames > overwriteIndex do
-		table.remove(frames)
-	end
-
-	rootPart.Anchored = false
-	rootPart.CFrame = tableToCFrame(chosenFrame.rootCFrame)
-	rootPart.AssemblyLinearVelocity = tableToVector3(chosenFrame.velocity)
-	rootPart.AssemblyAngularVelocity = tableToVector3(chosenFrame.angularVelocity)
-
-	humanoid.AutoRotate = true
-	humanoid.CameraOffset = chosenFrame.shiftLock and SHIFTLOCK_OFFSET or tableToVector3(chosenFrame.cameraOffset)
-	humanoid.WalkSpeed = chosenFrame.walkSpeed or humanoid.WalkSpeed
-	humanoid.JumpPower = chosenFrame.jumpPower or humanoid.JumpPower
-	humanoid:ChangeState(humanoidStateFromName(chosenFrame.humanoidStateName))
-
-	applyShiftLockFromFrame(chosenFrame)
-
-	camera.CameraType = Enum.CameraType.Custom
-	camera.CameraSubject = humanoid
-	camera.FieldOfView = chosenFrame.fieldOfView
-
-	state.mode = "recording"
-	state.isPlaying = false
-	state.playOneFrame = false
-	holdBack = false
-	holdForward = false
-	state.frame = #frames
-
-	if recordConn then
-		recordConn:Disconnect()
-	end
-
-	recordConn = RunService.RenderStepped:Connect(function(dt)
-		if state.mode ~= "recording" or not hasCharacter() then
-			return
-		end
-
-		table.insert(frames, makeFrame(dt))
-		state.frame = #frames
-		currentMouseDelta = Vector2.zero
-		currentMouseWheel = 0
-		updateGui()
-	end)
-
-	updateGui()
-end
-
-local function startReplayFromBeginning()
-	if not ensureReplayMode(1) then
-		return
-	end
-
-	state.frame = 1
-	state.isPlaying = true
-	state.playOneFrame = false
-
-	if replayConn then
-		replayConn:Disconnect()
-	end
-
-	replayConn = RunService.RenderStepped:Connect(function()
-		if state.mode ~= "replay" then
-			return
-		end
-		if not hasCharacter() then
-			return
-		end
-		if #frames == 0 then
-			return
-		end
-
-		if not state.isPlaying then
-			applyFrozenFrame(state.frame)
-			return
-		end
-
-		local index = clamp(state.frame, 1, #frames)
-		local frame = frames[index]
-		if not frame then
-			stopReplay()
-			return
-		end
-
-		rootPart.Anchored = true
-		humanoid.AutoRotate = false
-
-		rootPart.CFrame = tableToCFrame(frame.rootCFrame)
-		rootPart.AssemblyLinearVelocity = tableToVector3(frame.velocity)
-		rootPart.AssemblyAngularVelocity = tableToVector3(frame.angularVelocity)
-
-		humanoid.CameraOffset = frame.shiftLock and SHIFTLOCK_OFFSET or tableToVector3(frame.cameraOffset)
-		humanoid.WalkSpeed = frame.walkSpeed or humanoid.WalkSpeed
-		humanoid.JumpPower = frame.jumpPower or humanoid.JumpPower
-		humanoid:ChangeState(humanoidStateFromName(frame.humanoidStateName))
-
-		applyShiftLockFromFrame(frame)
-
-		camera.CameraType = Enum.CameraType.Scriptable
-		camera.CFrame = tableToCFrame(frame.cameraCFrame)
-		camera.FieldOfView = frame.fieldOfView
-
-		updateGui()
-
-		if state.playOneFrame then
-			state.playOneFrame = false
-			state.isPlaying = false
-			if index < #frames then
-				state.frame = index + 1
-				applyFrozenFrame(state.frame)
+local json
+do
+	json = (function()
+		local json = { _version = "0.1.2" }
+
+		local t = tick()
+		local currentstr
+		local lasti
+		local function checkwait(i)
+			if tick() - t > MinimumJSONFPS then
+				lasti = lasti or i
+				if i >= lasti then
+					local Type = (type(currentstr) == "table" and "En") or (type(currentstr) == "string" and "De")
+					if Type then
+						ConsoleMessage(Type.."coding... ("..tostring(i).."/"..tostring(#currentstr)..")")
+					end
+					game:GetService("RunService").Stepped:Wait()
+					t = tick()
+					lasti = i
+				end
 			end
+		end
+
+		local encode
+
+		local escape_char_map = {
+			[ "\\" ] = "\\",
+			[ "\"" ] = "\"",
+			[ "\b" ] = "b",
+			[ "\f" ] = "f",
+			[ "\n" ] = "n",
+			[ "\r" ] = "r",
+			[ "\t" ] = "t",
+		}
+
+		local escape_char_map_inv = { [ "/" ] = "/" }
+		for k, v in pairs(escape_char_map) do
+			escape_char_map_inv[v] = k
+		end
+
+		local function escape_char(c)
+			return "\\" .. (escape_char_map[c] or string.format("u%04x", c:byte()))
+		end
+
+		local function encode_nil(val)
+			return "null"
+		end
+
+		local function encode_table(val, stack)
+			local res = {}
+			stack = stack or {}
+
+			if stack[val] then error("circular reference") end
+			stack[val] = true
+
+			if rawget(val, 1) ~= nil or next(val) == nil then
+				local n = 0
+				for k in pairs(val) do
+					if type(k) ~= "number" then
+						error("invalid table: mixed or invalid key types")
+					end
+					n = n + 1
+				end
+				if n ~= #val then
+					error("invalid table: sparse array")
+				end
+				for i, v in ipairs(val) do
+					checkwait(i)
+					table.insert(res, encode(v, stack))
+				end
+				stack[val] = nil
+				return "[" .. table.concat(res, ",") .. "]"
+			else
+				local i = 0
+				for k, v in pairs(val) do
+					i = i + 1
+					if type(k) ~= "string" then
+						error("invalid table: mixed or invalid key types")
+					end
+					checkwait(i)
+					table.insert(res, encode(k, stack) .. ":" .. encode(v, stack))
+				end
+				stack[val] = nil
+				return "{" .. table.concat(res, ",") .. "}"
+			end
+		end
+
+		local function encode_string(val)
+			return '"' .. val:gsub('[%z\1-\31\\"]', escape_char) .. '"'
+		end
+
+		local function encode_number(val)
+			if val ~= val or val <= -math.huge or val >= math.huge then
+				error("unexpected number value '" .. tostring(val) .. "'")
+			end
+			return string.format("%.14g", val)
+		end
+
+		local type_func_map = {
+			[ "nil"     ] = encode_nil,
+			[ "table"   ] = encode_table,
+			[ "string"  ] = encode_string,
+			[ "number"  ] = encode_number,
+			[ "boolean" ] = tostring,
+		}
+
+		encode = function(val, stack)
+			local t = type(val)
+			local f = type_func_map[t]
+			if f then
+				t = tick()
+				return f(val, stack)
+			end
+			error("unexpected type '" .. t .. "'")
+		end
+
+		function json.encode(val)
+			currentstr = val
+			lasti = nil
+			return ( encode(val) )
+		end
+
+		local parse
+
+		local function create_set(...)
+			local res = {}
+			for i = 1, select("#", ...) do
+				res[ select(i, ...) ] = true
+			end
+			return res
+		end
+
+		local space_chars   = create_set(" ", "\t", "\r", "\n")
+		local delim_chars   = create_set(" ", "\t", "\r", "\n", "]", "}", ",")
+		local escape_chars  = create_set("\\", "/", '"', "b", "f", "n", "r", "t", "u")
+		local literals      = create_set("true", "false", "null")
+
+		local literal_map = {
+			[ "true"  ] = true,
+			[ "false" ] = false,
+			[ "null"  ] = nil,
+		}
+
+		local function next_char(str, idx, set, negate)
+			for i = idx, #str do
+				if set[str:sub(i, i)] ~= negate then
+					return i
+				end
+			end
+			return #str + 1
+		end
+
+		local function decode_error(str, idx, msg)
+			local line_count = 1
+			local col_count = 1
+			for i = 1, idx - 1 do
+				col_count = col_count + 1
+				if str:sub(i, i) == "\n" then
+					line_count = line_count + 1
+					col_count = 1
+				end
+			end
+			error( string.format("%s at line %d col %d", msg, line_count, col_count) )
+		end
+
+		local function codepoint_to_utf8(n)
+			local f = math.floor
+			if n <= 0x7f then
+				return string.char(n)
+			elseif n <= 0x7ff then
+				return string.char(f(n / 64) + 192, n % 64 + 128)
+			elseif n <= 0xffff then
+				return string.char(f(n / 4096) + 224, f(n % 4096 / 64) + 128, n % 64 + 128)
+			elseif n <= 0x10ffff then
+				return string.char(f(n / 262144) + 240, f(n % 262144 / 4096) + 128,
+					f(n % 4096 / 64) + 128, n % 64 + 128)
+			end
+			error( string.format("invalid unicode codepoint '%x'", n) )
+		end
+
+		local function parse_unicode_escape(s)
+			local n1 = tonumber( s:sub(1, 4),  16 )
+			local n2 = tonumber( s:sub(7, 10), 16 )
+			if n2 then
+				return codepoint_to_utf8((n1 - 0xd800) * 0x400 + (n2 - 0xdc00) + 0x10000)
+			else
+				return codepoint_to_utf8(n1)
+			end
+		end
+
+		local function parse_string(str, i)
+			local res = ""
+			local j = i + 1
+			local k = j
+
+			while j <= #str do
+				local x = str:byte(j)
+
+				if x < 32 then
+					decode_error(str, j, "control character in string")
+
+				elseif x == 92 then
+					res = res .. str:sub(k, j - 1)
+					j = j + 1
+					local c = str:sub(j, j)
+					if c == "u" then
+						local hex = str:match("^[dD][89aAbB]%x%x\\u%x%x%x%x", j + 1)
+							or str:match("^%x%x%x%x", j + 1)
+							or decode_error(str, j - 1, "invalid unicode escape in string")
+						res = res .. parse_unicode_escape(hex)
+						j = j + #hex
+					else
+						if not escape_chars[c] then
+							decode_error(str, j - 1, "invalid escape char '" .. c .. "' in string")
+						end
+						res = res .. escape_char_map_inv[c]
+					end
+					k = j + 1
+
+				elseif x == 34 then
+					res = res .. str:sub(k, j - 1)
+					return res, j + 1
+				end
+
+				j = j + 1
+				checkwait(i)
+			end
+
+			decode_error(str, i, "expected closing quote for string")
+		end
+
+		local function parse_number(str, i)
+			local x = next_char(str, i, delim_chars)
+			local s = str:sub(i, x - 1)
+			local n = tonumber(s)
+			if not n then
+				decode_error(str, i, "invalid number '" .. s .. "'")
+			end
+			checkwait(i)
+			return n, x
+		end
+
+		local function parse_literal(str, i)
+			local x = next_char(str, i, delim_chars)
+			local word = str:sub(i, x - 1)
+			if not literals[word] then
+				decode_error(str, i, "invalid literal '" .. word .. "'")
+			end
+			checkwait(i)
+			return literal_map[word], x
+		end
+
+		local function parse_array(str, i)
+			local res = {}
+			local n = 1
+			i = i + 1
+			while 1 do
+				local x
+				i = next_char(str, i, space_chars, true)
+				if str:sub(i, i) == "]" then
+					i = i + 1
+					break
+				end
+				x, i = parse(str, i)
+				res[n] = x
+				n = n + 1
+				i = next_char(str, i, space_chars, true)
+				local chr = str:sub(i, i)
+				i = i + 1
+				checkwait(i)
+				if chr == "]" then break end
+				if chr ~= "," then decode_error(str, i, "expected ']' or ','") end
+			end
+			return res, i
+		end
+
+		local function parse_object(str, i)
+			local res = {}
+			i = i + 1
+			while 1 do
+				local key, val
+				i = next_char(str, i, space_chars, true)
+				if str:sub(i, i) == "}" then
+					i = i + 1
+					break
+				end
+				if str:sub(i, i) ~= '"' then
+					decode_error(str, i, "expected string for key")
+				end
+				key, i = parse(str, i)
+				i = next_char(str, i, space_chars, true)
+				if str:sub(i, i) ~= ":" then
+					decode_error(str, i, "expected ':' after key")
+				end
+				i = next_char(str, i + 1, space_chars, true)
+				val, i = parse(str, i)
+				res[key] = val
+				i = next_char(str, i, space_chars, true)
+				local chr = str:sub(i, i)
+				i = i + 1
+				checkwait(i)
+				if chr == "}" then break end
+				if chr ~= "," then decode_error(str, i, "expected '}' or ','") end
+			end
+			return res, i
+		end
+
+		local char_func_map = {
+			[ '"' ] = parse_string,
+			[ "0" ] = parse_number,
+			[ "1" ] = parse_number,
+			[ "2" ] = parse_number,
+			[ "3" ] = parse_number,
+			[ "4" ] = parse_number,
+			[ "5" ] = parse_number,
+			[ "6" ] = parse_number,
+			[ "7" ] = parse_number,
+			[ "8" ] = parse_number,
+			[ "9" ] = parse_number,
+			[ "-" ] = parse_number,
+			[ "t" ] = parse_literal,
+			[ "f" ] = parse_literal,
+			[ "n" ] = parse_literal,
+			[ "[" ] = parse_array,
+			[ "{" ] = parse_object,
+		}
+
+		parse = function(str, idx)
+			local chr = str:sub(idx, idx)
+			local f = char_func_map[chr]
+			if f then
+				return f(str, idx)
+			end
+			decode_error(str, idx, "unexpected character '" .. chr .. "'")
+		end
+
+		function json.decode(str)
+			t = tick()
+			currentstr = str
+			lasti = nil
+			if type(str) ~= "string" then
+				error("expected argument of type string, got " .. type(str))
+			end
+			local res, idx = parse(str, next_char(str, 1, space_chars, true))
+			idx = next_char(str, idx, space_chars, true)
+			if idx <= #str then
+				decode_error(str, idx, "trailing garbage")
+			end
+			return res
+		end
+
+		return json
+	end)()
+end
+
+local RandomString
+local RoundNumber
+local Vector3ToTable
+local TableToVector3
+local CFrameToTable
+local TableToCFrame
+local RoundVector3
+local RoundCFrame
+local FindListIndex
+local WaitForInput
+do
+	RandomString = function()
+		local str = ""
+		for _ = 1,random(1,20) do
+			local typev = random(1,3)
+			if typev == 1 then
+				str = str..string.char(random(97,122))
+			elseif typev == 2 then
+				str = str..string.char(random(65,90))
+			elseif typev == 3 then
+				str = str..string.char(random(48,57))
+			end
+		end
+		return str
+	end
+	RoundNumber = function(Number,Digits)
+		local Mult = 10^max(tonumber(Digits) or 0,0)
+		return floor(Number*Mult+0.5)/Mult
+	end
+	Vector3ToTable = function(V3)
+		return {V3.X,V3.Y,V3.Z}
+	end
+	TableToVector3 = function(Table)
+		return Vector3.new(unpack(Table))
+	end
+	Vector2ToTable = function(V2)
+		return {V2.X,V2.Y}
+	end
+	TableToVector2 = function(Table)
+		return Vector2.new(unpack(Table))
+	end
+	CFrameToTable = function(CF)
+		return {CF:GetComponents()}
+	end
+	TableToCFrame = function(Table)
+		return CFrame.new(unpack(Table))
+	end
+	RoundTable = function(Table,Digits)
+		local RoundedTable = {}
+		for Index,Number in pairs(Table) do
+			RoundedTable[Index] = RoundNumber(Number,Digits)
+		end
+		return RoundedTable
+	end
+	FindListIndex = function(Table,Search)
+		for Index,Value in pairs(Table) do
+			if Value == Search then
+				return Index
+			end
+		end
+	end
+	WaitForInput = function()
+		local KeyPressed = Instance.new("BindableEvent")
+		local InputBeganConnection
+		InputBeganConnection = UserInputService.InputBegan:Connect(function(Input)
+			if Input.UserInputType == Enum.UserInputType.Keyboard then
+				RunService.RenderStepped:Wait()
+				KeyPressed:Fire()
+			end
+		end)
+		KeyPressed.Event:Wait()
+		InputBeganConnection:Disconnect()
+		KeyPressed:Destroy()
+	end
+end
+
+local GUI
+do
+	GUI = Instance.new("ScreenGui")
+	GUI.Name = RandomString()
+	if syn then
+		syn.protect_gui(GUI)
+	end
+
+	MainFrame.Size = UDim2.fromOffset(1000,300)
+	MainFrame.Parent = GUI
+
+	RecordedFramesLabel.Text = "0"
+	RecordedFramesLabel.Size = UDim2.fromOffset(80,60)
+	RecordedFramesLabel.Position = UDim2.fromOffset(0,0)
+	RecordedFramesLabel.TextScaled = true
+	RecordedFramesLabel.Parent = MainFrame
+
+	ColorCodeFrame.Size = UDim2.fromOffset(140,60)
+	ColorCodeFrame.Position = UDim2.fromOffset(80,240)
+	ColorCodeFrame.TextScaled = true
+	ColorCodeFrame.Parent = MainFrame
+
+	SaveToFileButton.Text = "Save Recording to File [P]"
+	SaveToFileButton.Size = UDim2.fromOffset(80,60)
+	SaveToFileButton.Position = UDim2.fromOffset(0,60)
+	SaveToFileButton.TextScaled = true
+	SaveToFileButton.Parent = MainFrame
+
+	IdleButton.Text = "Frozen to Idle [M]"
+	IdleButton.Size = UDim2.fromOffset(80,60)
+	IdleButton.Position = UDim2.fromOffset(0,120)
+	IdleButton.TextScaled = true
+	IdleButton.Parent = MainFrame
+
+	IgnoreGameProcessedButton.Text = "Ignore GameProcessed"
+	IgnoreGameProcessedButton.Size = UDim2.fromOffset(80,60)
+	IgnoreGameProcessedButton.BackgroundColor3 = Color3.new(1,0.5,0.5)
+	IgnoreGameProcessedButton.Position = UDim2.fromOffset(0,180)
+	IgnoreGameProcessedButton.TextScaled = true
+	IgnoreGameProcessedButton.Parent = MainFrame
+
+	CurrentPlaceIdButton.Text = "PlaceId: "..tostring(PlaceId)
+	CurrentPlaceIdButton.Size = UDim2.fromOffset(80,60)
+	CurrentPlaceIdButton.Position = UDim2.fromOffset(0,240)
+	CurrentPlaceIdButton.TextScaled = true
+	CurrentPlaceIdButton.Parent = MainFrame
+
+	ReadButton.Text = "Read Replay"
+	ReadButton.Size = UDim2.fromOffset(80,60)
+	ReadButton.Position = UDim2.fromOffset(80,0)
+	ReadButton.TextScaled = true
+	ReadButton.Parent = MainFrame
+
+	SaveFileInfoLabel.Text = "E to freeze/unfreeze, R to go back in time, T to go fowards in time, F to go back one frame, G to go fowards one frame, L to abort replay, U to toggle UI, P to save recording to file (REMEMBER TO SAVE TO FILE)"
+	SaveFileInfoLabel.Size = UDim2.fromOffset(140,180)
+	SaveFileInfoLabel.Position = UDim2.fromOffset(80,60)
+	SaveFileInfoLabel.TextScaled = true
+	SaveFileInfoLabel.Parent = MainFrame
+
+	WritingPressedKeysLabel.Size = UDim2.fromOffset(80,60)
+	WritingPressedKeysLabel.Position = UDim2.fromOffset(220,240)
+	WritingPressedKeysLabel.TextColor3 = Color3.new(0,0,0.5)
+	WritingPressedKeysLabel.TextScaled = true
+	WritingPressedKeysLabel.Text = "|"
+	WritingPressedKeysLabel.Parent = MainFrame
+
+	PressedKeysLabel.Size = UDim2.fromOffset(80,60)
+	PressedKeysLabel.Position = UDim2.fromOffset(220,180)
+	PressedKeysLabel.TextScaled = true
+	PressedKeysLabel.Text = "|"
+	PressedKeysLabel.Parent = MainFrame
+
+	ConnectedLabel.Size = UDim2.fromOffset(80,60)
+	ConnectedLabel.Position = UDim2.fromOffset(220,0)
+	ConnectedLabel.TextScaled = true
+	ConnectedLabel.Text = "Internal input mode"
+	ConnectedLabel.TextColor3 = Color3.new(0,0.8,0)
+	ConnectedLabel.Parent = MainFrame
+
+	ConsoleFrame.Size = UDim2.fromOffset(700,300)
+	ConsoleFrame.Position = UDim2.fromOffset(300,0)
+	ConsoleFrame.BackgroundColor3 = Color3.fromRGB(0,0,0)
+	ConsoleFrame.Parent = MainFrame
+
+	CommandBar.Size = UDim2.fromOffset(700,15)
+	CommandBar.Position = UDim2.fromOffset(300,300)
+	CommandBar.BackgroundColor3 = Color3.new(0,0,0)
+	CommandBar.TextColor3 = Color3.new(1,1,1)
+	CommandBar.Text = ""
+	CommandBar.TextXAlignment = Enum.TextXAlignment.Left
+	CommandBar.BorderSizePixel = 0
+	CommandBar.Parent = MainFrame
+
+	ConsoleListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	ConsoleListLayout.FillDirection = Enum.FillDirection.Vertical
+	ConsoleListLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
+	ConsoleListLayout.Parent = ConsoleFrame
+end
+
+local Dragify
+local SetColorCodeFrame
+local GetColorCodeFrame
+do
+	ConsoleMessage = function(...)
+		local Args = {}
+		local Children = ConsoleFrame:GetChildren()
+		do
+			if #Children > 15 then
+				local LowestLayoutOrder = {
+					Label = nil;
+					LayoutOrder = math.huge;
+				}
+				for _,v in pairs(Children) do
+					if v:IsA("TextLabel") then
+						if v.LayoutOrder < LowestLayoutOrder.LayoutOrder then
+							LowestLayoutOrder.Label = v
+							LowestLayoutOrder.LayoutOrder = v.LayoutOrder
+						end
+					end
+				end
+				if LowestLayoutOrder.Label then
+					LowestLayoutOrder.Label:Destroy()
+				end
+				Children = ConsoleFrame:GetChildren()
+			end
+		end
+		do
+			for Index,Value in pairs({...}) do
+				Args[Index] = tostring(Value)
+			end
+		end
+		local Message = table.concat(Args," ")
+		local Label = ConsoleMessageLabel:Clone()
+		Label.Size = UDim2.fromOffset(700,20)
+		Label.TextSize = 14
+		Label.Font = Enum.Font.Code
+		Label.BackgroundTransparency = 1
+		Label.TextColor3 = Color3.fromRGB(255,255,255)
+		Label.TextXAlignment = Enum.TextXAlignment.Left
+		Label.Text = " "..Message
+		Label.LayoutOrder = -999999999+#Children
+		Label.Parent = ConsoleFrame
+	end
+
+	ConsoleMessage("Tasability loading...")
+
+	Dragify = function(Frame)
+		local dragToggle,dragStart,dragInput,startPos
+		local function updateInput(input)
+			local Delta = input.Position - dragStart
+			Frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + Delta.X, startPos.Y.Scale, startPos.Y.Offset + Delta.Y)
+		end
+		Frame.InputBegan:Connect(function(input)
+			if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and UserInputService:GetFocusedTextBox() == nil then
+				dragToggle = true
+				dragStart = input.Position
+				startPos = Frame.Position
+				input.Changed:Connect(function()
+					if input.UserInputState == Enum.UserInputState.End then
+						dragToggle = false
+					end
+				end)
+			end
+		end)
+		Frame.InputChanged:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+				dragInput = input
+			end
+		end)
+		game:GetService("UserInputService").InputChanged:Connect(function(input)
+			if input == dragInput and dragToggle then
+				updateInput(input)
+			end
+		end)
+	end
+	SetColorCodeFrame = function(Name)
+		ColorCodeFrame.BackgroundColor3 = ColorCodes[Name] or ColorCodes.None
+		ColorCodeFrame.Text = ColorCodes[Name] and Name or "None"
+	end
+	GetColorCodeFrame = function()
+		return ColorCodeFrame.Text
+	end
+end
+
+do
+	do
+		local OldNameCall = nil
+		local plr = game.Players.LocalPlayer
+		OldNameCall = hookmetamethod(game, "__namecall", function(Self, ...)
+			local NameCallMethod = getnamecallmethod()
+			if not checkcaller() and Self == plr and NameCallMethod == "Kick" then
+				if getgenv().SendNotifications == true then
+					game:GetService("StarterGui"):SetCore("SendNotification", {
+						Title = "Almost Kicked",
+						Text = tostring(({...})[1]),
+						Icon = "rbxassetid://6238540373",
+						Duration = 3,
+					})
+				end
+				return nil
+			end
+			return OldNameCall(Self, ...)
+		end)
+	end
+	pcall(function()
+		game.ReplicatedStorage.Remotes.Send:Destroy()
+	end)
+	pcall(function()
+		local sendremote = game.ReplicatedStorage.DefaultChatSystemChatEvents.ChannelNameColorUpdated
+		local oldspawn
+		oldspawn = hookfunction(getrenv().spawn, function(...)
+			if not checkcaller() and (tostring(getcallingscript()) == "Animate" or tostring(getcallingscript()) == "RbxAnimateScript") then
+				return oldspawn(function() end)
+			end
+			return oldspawn(...)
+		end)
+		sendremote:Destroy()
+	end)
+end
+
+local StopAllAnimations
+local Reanimate
+local GetAnimationFunctionFromId
+local onDied
+local onRunning
+local onJumping
+local onClimbing
+local onGettingUp
+local onFreeFall
+local onFallingDown
+local onSeated
+local onPlatformStanding
+local onSwimming
+local PlayAnimation
+local setAnimationSpeed
+
+do
+	StopAllAnimations = function()
+		for _,v in pairs(Humanoid:GetPlayingAnimationTracks()) do
+			v:Stop()
+		end
+	end
+	GetAnimationFunctionFromId = function(Id)
+		return ({
+			[1] = OnDied;
+			[2] = onRunning;
+			[3] = onJumping;
+			[4] = onClimbing;
+			[5] = onGettingUp;
+			[6] = onFreeFall;
+			[7] = onFallingDown;
+			[8] = onSeated;
+			[9] = onPlatformStanding;
+			[10] = onSwimming;
+		})[Id]
+	end
+	Reanimate = function(Character)
+		if Character:WaitForChild("Animate",3) then
+			for _, Animate in ipairs(Character:GetDescendants()) do
+				if Animate:IsA("LocalScript") and Animate.Name == "Animate" then
+					for _,Connection in pairs(getconnections(Animate.Changed)) do
+						Connection:Disconnect()
+					end
+					if BypassAntiExploit then
+						Animate.Disabled = true
+						if setparentinternal then
+							setparentinternal(Animate, game.Lighting)
+						else
+							ConsoleMessage("Your exploit does not support setparentinternal, expect animation glitches")
+						end
+					else
+						Animate:Destroy()
+					end
+				end
+			end
+		else
+			ConsoleMessage("[ERROR] Animate script could not be found, you probably executed twice")
+			error("Animate script could not be found, you probably executed twice")
+		end
+		StopAllAnimations()
+		do
+			local Figure = Character
+			local Torso = Figure:WaitForChild("Torso")
+			local RightShoulder = Torso:WaitForChild("Right Shoulder")
+			local LeftShoulder = Torso:WaitForChild("Left Shoulder")
+			local RightHip = Torso:WaitForChild("Right Hip")
+			local LeftHip = Torso:WaitForChild("Left Hip")
+			local Neck = Torso:WaitForChild("Neck")
+			local Humanoid = Figure:WaitForChild("Humanoid")
+
+			local currentAnim = ""
+			local currentAnimInstance = nil
+			local currentAnimTrack = nil
+			local currentAnimKeyframeHandler = nil
+			local animTable = {}
+			local animNames = {
+				idle = {
+					{ id = "http://www.roblox.com/asset/?id=180435571", weight = 8 },
+					{ id = "http://www.roblox.com/asset/?id=180435792", weight = 1 }
+				},
+				walk = {
+					{ id = "http://www.roblox.com/asset/?id=180426354", weight = 10 }
+				},
+				run = {
+					{ id = "run.xml", weight = 10 }
+				},
+				jump = {
+					{ id = "http://www.roblox.com/asset/?id=125750702", weight = 12 }
+				},
+				fall = {
+					{ id = "http://www.roblox.com/asset/?id=180436148", weight = 9 }
+				},
+				climb = {
+					{ id = "http://www.roblox.com/asset/?id=180436334", weight = 10 }
+				},
+				sit = {
+					{ id = "http://www.roblox.com/asset/?id=178130996", weight = 10 }
+				},
+				toolnone = {
+					{ id = "http://www.roblox.com/asset/?id=182393478", weight = 10 }
+				},
+				toolslash = {
+					{ id = "http://www.roblox.com/asset/?id=129967390", weight = 10 }
+				},
+				toollunge = {
+					{ id = "http://www.roblox.com/asset/?id=129967478", weight = 10 }
+				},
+				wave = {
+					{ id = "http://www.roblox.com/asset/?id=128777973", weight = 10 }
+				},
+				point = {
+					{ id = "http://www.roblox.com/asset/?id=128853357", weight = 10 }
+				},
+				dance1 = {
+					{ id = "http://www.roblox.com/asset/?id=182435998", weight = 10 },
+					{ id = "http://www.roblox.com/asset/?id=182491037", weight = 10 },
+					{ id = "http://www.roblox.com/asset/?id=182491065", weight = 10 }
+				},
+				dance2 = {
+					{ id = "http://www.roblox.com/asset/?id=182436842", weight = 10 },
+					{ id = "http://www.roblox.com/asset/?id=182491248", weight = 10 },
+					{ id = "http://www.roblox.com/asset/?id=182491277", weight = 10 }
+				},
+				dance3 = {
+					{ id = "http://www.roblox.com/asset/?id=182436935", weight = 10 },
+					{ id = "http://www.roblox.com/asset/?id=182491368", weight = 10 },
+					{ id = "http://www.roblox.com/asset/?id=182491423", weight = 10 }
+				},
+				laugh = {
+					{ id = "http://www.roblox.com/asset/?id=129423131", weight = 10 }
+				},
+				cheer = {
+					{ id = "http://www.roblox.com/asset/?id=129423030", weight = 10 }
+				},
+			}
+			local dances = {"dance1", "dance2", "dance3"}
+			local emoteNames = { wave = false, point = false, dance1 = true, dance2 = true, dance3 = true, laugh = false, cheer = false}
+
+			function configureAnimationSet(name, fileList)
+				if (animTable[name] ~= nil) then
+					for _, connection in pairs(animTable[name].connections) do
+						connection:disconnect()
+					end
+				end
+				animTable[name] = {}
+				animTable[name].count = 0
+				animTable[name].totalWeight = 0
+				animTable[name].connections = {}
+
+				if (animTable[name].count <= 0) then
+					for idx, anim in pairs(fileList) do
+						animTable[name][idx] = {}
+						animTable[name][idx].anim = Instance.new("Animation")
+						animTable[name][idx].anim.Name = name
+						animTable[name][idx].anim.AnimationId = anim.id
+						animTable[name][idx].weight = anim.weight
+						animTable[name].count = animTable[name].count + 1
+						animTable[name].totalWeight = animTable[name].totalWeight + anim.weight
+					end
+				end
+			end
+
+			local animator = Humanoid and Humanoid:FindFirstChildOfClass("Animator") or nil
+			if animator then
+				local animTracks = animator:GetPlayingAnimationTracks()
+				for i,track in ipairs(animTracks) do
+					track:Stop(0)
+					track:Destroy()
+				end
+			end
+
+			for name, fileList in pairs(animNames) do
+				configureAnimationSet(name, fileList)
+			end
+
+			local toolAnim = "None"
+			local toolAnimTime = 0
+
+			local jumpAnimTime = 0
+			local jumpAnimDuration = 0.3
+
+			local toolTransitionTime = 0.1
+			local fallTransitionTime = 0.3
+			local jumpMaxLimbVelocity = 0.75
+
+			function stopAllAnimations()
+				local oldAnim = currentAnim
+				if (emoteNames[oldAnim] ~= nil and emoteNames[oldAnim] == false) then
+					oldAnim = "idle"
+				end
+
+				currentAnim = ""
+				currentAnimInstance = nil
+				if (currentAnimKeyframeHandler ~= nil) then
+					currentAnimKeyframeHandler:disconnect()
+				end
+
+				if (currentAnimTrack ~= nil) then
+					currentAnimTrack:Stop()
+					currentAnimTrack:Destroy()
+					currentAnimTrack = nil
+				end
+				return oldAnim
+			end
+
+			setAnimationSpeed = function(speed)
+				if speed ~= currentAnimSpeed and currentAnimTrack then
+					currentAnimSpeed = speed
+					currentAnimTrack:AdjustSpeed(currentAnimSpeed)
+				end
+			end
+
+			function keyFrameReachedFunc(frameName)
+				if (frameName == "End") then
+					local repeatAnim = currentAnim
+					if (emoteNames[repeatAnim] ~= nil and emoteNames[repeatAnim] == false) then
+						repeatAnim = "idle"
+					end
+					local animSpeed = currentAnimSpeed
+					playAnimation(repeatAnim, 0.0, Humanoid)
+					setAnimationSpeed(animSpeed)
+				end
+			end
+
+			playAnimation = function(animName, transitionTime, humanoid, bypassAnimateDisabled)
+				pcall(function()
+					if AnimateDisabled and not bypassAnimateDisabled then
+						return
+					end
+
+					table.insert(AnimationQueue,{animName,transitionTime})
+
+					local roll = math.random(1, animTable[animName].totalWeight)
+					local idx = 1
+					while (roll > animTable[animName][idx].weight) do
+						roll = roll - animTable[animName][idx].weight
+						idx = idx + 1
+					end
+					local anim = animTable[animName][idx].anim
+
+					if (anim ~= currentAnimInstance) then
+						if (currentAnimTrack ~= nil) then
+							currentAnimTrack:Stop(transitionTime)
+							currentAnimTrack:Destroy()
+						end
+
+						currentAnimSpeed = 1.0
+						currentAnimTrack = humanoid:LoadAnimation(anim)
+						currentAnimTrack.Priority = Enum.AnimationPriority.Core
+						currentAnimTrack:Play(transitionTime)
+						currentAnim = animName
+						currentAnimInstance = anim
+
+						if (currentAnimKeyframeHandler ~= nil) then
+							currentAnimKeyframeHandler:disconnect()
+						end
+						currentAnimKeyframeHandler = currentAnimTrack.KeyframeReached:connect(keyFrameReachedFunc)
+					end
+				end)
+			end
+
+			local toolAnimName = ""
+			local toolAnimTrack = nil
+			local toolAnimInstance = nil
+			local currentToolAnimKeyframeHandler = nil
+
+			function toolKeyFrameReachedFunc(frameName)
+				if (frameName == "End") then
+					playToolAnimation(toolAnimName, 0.0, Humanoid)
+				end
+			end
+
+			function playToolAnimation(animName, transitionTime, humanoid, priority)
+				local roll = math.random(1, animTable[animName].totalWeight)
+				local idx = 1
+				while (roll > animTable[animName][idx].weight) do
+					roll = roll - animTable[animName][idx].weight
+					idx = idx + 1
+				end
+				local anim = animTable[animName][idx].anim
+
+				if (toolAnimInstance ~= anim) then
+					if (toolAnimTrack ~= nil) then
+						toolAnimTrack:Stop()
+						toolAnimTrack:Destroy()
+						transitionTime = 0
+					end
+
+					toolAnimTrack = humanoid:LoadAnimation(anim)
+					if priority then
+						toolAnimTrack.Priority = priority
+					end
+					toolAnimTrack:Play(transitionTime)
+					toolAnimName = animName
+					toolAnimInstance = anim
+
+					currentToolAnimKeyframeHandler = toolAnimTrack.KeyframeReached:connect(toolKeyFrameReachedFunc)
+				end
+			end
+
+			function stopToolAnimations()
+				local oldAnim = toolAnimName
+
+				if (currentToolAnimKeyframeHandler ~= nil) then
+					currentToolAnimKeyframeHandler:disconnect()
+				end
+
+				toolAnimName = ""
+				toolAnimInstance = nil
+				if (toolAnimTrack ~= nil) then
+					toolAnimTrack:Stop()
+					toolAnimTrack:Destroy()
+					toolAnimTrack = nil
+				end
+
+				return oldAnim
+			end
+
+			onRunning = function(speed)
+				if speed > 0.01 then
+					playAnimation("walk", 0.1, Humanoid)
+					if currentAnimInstance and currentAnimInstance.AnimationId == "http://www.roblox.com/asset/?id=180426354" then
+						setAnimationSpeed(speed / 14.5)
+					end
+					pose = "Running"
+				else
+					if emoteNames[currentAnim] == nil then
+						playAnimation("idle", 0.1, Humanoid)
+						pose = "Standing"
+					end
+				end
+			end
+
+			onDied = function() pose = "Dead" end
+
+			onJumping = function()
+				playAnimation("jump", 0.1, Humanoid)
+				jumpAnimTime = jumpAnimDuration
+				pose = "Jumping"
+			end
+
+			onClimbing = function(speed)
+				playAnimation("climb", 0.1, Humanoid)
+				setAnimationSpeed(speed / 12.0)
+				pose = "Climbing"
+			end
+
+			onGettingUp = function() pose = "GettingUp" end
+
+			onFreeFall = function()
+				if (jumpAnimTime <= 0) then
+					playAnimation("fall", fallTransitionTime, Humanoid)
+				end
+				pose = "FreeFall"
+			end
+
+			onFallingDown = function() pose = "FallingDown" end
+			onSeated = function() pose = "Seated" end
+			onPlatformStanding = function() pose = "PlatformStanding" end
+
+			onSwimming = function(speed)
+				if speed > 0 then
+					pose = "Running"
+				else
+					pose = "Standing"
+				end
+			end
+
+			function getTool()
+				for _, kid in ipairs(Figure:GetChildren()) do
+					if kid.className == "Tool" then return kid end
+				end
+				return nil
+			end
+
+			function getToolAnim(tool)
+				for _, c in ipairs(tool:GetChildren()) do
+					if c.Name == "toolanim" and c.className == "StringValue" then
+						return c
+					end
+				end
+				return nil
+			end
+
+			function animateTool()
+				if (toolAnim == "None") then
+					playToolAnimation("toolnone", toolTransitionTime, Humanoid, Enum.AnimationPriority.Idle)
+					return
+				end
+
+				if (toolAnim == "Slash") then
+					playToolAnimation("toolslash", 0, Humanoid, Enum.AnimationPriority.Action)
+					return
+				end
+
+				if (toolAnim == "Lunge") then
+					playToolAnimation("toollunge", 0, Humanoid, Enum.AnimationPriority.Action)
+					return
+				end
+			end
+
+			function moveSit()
+				RightShoulder.MaxVelocity = 0.15
+				LeftShoulder.MaxVelocity = 0.15
+				RightShoulder:SetDesiredAngle(3.14 /2)
+				LeftShoulder:SetDesiredAngle(-3.14 /2)
+				RightHip:SetDesiredAngle(3.14 /2)
+				LeftHip:SetDesiredAngle(-3.14 /2)
+			end
+
+			local lastTick = 0
+
+			function move(time)
+				if AnimateDisabled then
+					return
+				end
+
+				local amplitude = 1
+				local frequency = 1
+				local deltaTime = time - lastTick
+				lastTick = time
+
+				local climbFudge = 0
+				local setAngles = false
+
+				if (jumpAnimTime > 0) then
+					jumpAnimTime = jumpAnimTime - deltaTime
+				end
+
+				if (pose == "FreeFall" and jumpAnimTime <= 0) then
+					playAnimation("fall", fallTransitionTime, Humanoid)
+				elseif (pose == "Seated") then
+					playAnimation("sit", 0.5, Humanoid)
+					return
+				elseif (pose == "Running") then
+					playAnimation("walk", 0.1, Humanoid)
+				elseif (pose == "Dead" or pose == "GettingUp" or pose == "FallingDown" or pose == "Seated" or pose == "PlatformStanding") then
+					stopAllAnimations()
+					amplitude = 0.1
+					frequency = 1
+					setAngles = true
+				end
+
+				if (setAngles) then
+					local desiredAngle = amplitude * math.sin(time * frequency)
+					RightShoulder:SetDesiredAngle(desiredAngle + climbFudge)
+					LeftShoulder:SetDesiredAngle(desiredAngle - climbFudge)
+					RightHip:SetDesiredAngle(-desiredAngle)
+					LeftHip:SetDesiredAngle(-desiredAngle)
+				end
+
+				local tool = getTool()
+				if tool and tool:FindFirstChild("Handle") then
+					local animStringValueObject = getToolAnim(tool)
+
+					if animStringValueObject then
+						toolAnim = animStringValueObject.Value
+						animStringValueObject.Parent = nil
+						toolAnimTime = time + .3
+					end
+
+					if time > toolAnimTime then
+						toolAnimTime = 0
+						toolAnim = "None"
+					end
+
+					animateTool()
+				else
+					stopToolAnimations()
+					toolAnim = "None"
+					toolAnimInstance = nil
+					toolAnimTime = 0
+				end
+			end
+
+			Humanoid.Died:connect(function(...)
+				if AnimateDisabled then return end
+				onDied(...)
+			end)
+			Humanoid.Running:connect(function(Speed)
+				if AnimateDisabled then return end
+				onRunning(Speed)
+			end)
+			Humanoid.Jumping:connect(onJumping)
+			Humanoid.Climbing:connect(function(Speed)
+				if AnimateDisabled then return end
+				onClimbing(Speed)
+			end)
+			Humanoid.GettingUp:connect(function(...)
+				if AnimateDisabled then return end
+				onGettingUp(...)
+			end)
+			Humanoid.FreeFalling:connect(function(...)
+				if AnimateDisabled then return end
+				onFreeFall(...)
+			end)
+			Humanoid.FallingDown:connect(function(...)
+				if AnimateDisabled then return end
+				onFallingDown(...)
+			end)
+			Humanoid.Seated:connect(function(...)
+				if AnimateDisabled then return end
+				onSeated(...)
+			end)
+			Humanoid.PlatformStanding:connect(function(...)
+				if AnimateDisabled then return end
+				onPlatformStanding(...)
+			end)
+			Humanoid.Swimming:connect(function(...)
+				if AnimateDisabled then return end
+				onSwimming(...)
+			end)
+
+			game:GetService("Players").LocalPlayer.Chatted:connect(function(msg)
+				local emote = ""
+				if msg == "/e dance" then
+					emote = dances[math.random(1, #dances)]
+				elseif (string.sub(msg, 1, 3) == "/e ") then
+					emote = string.sub(msg, 4)
+				elseif (string.sub(msg, 1, 7) == "/emote ") then
+					emote = string.sub(msg, 8)
+				end
+
+				if (pose == "Standing" and emoteNames[emote] ~= nil) then
+					playAnimation(emote, 0.1, Humanoid)
+				end
+			end)
+
+			playAnimation("idle", 0.1, Humanoid)
+			pose = "Standing"
+
+			spawn(function()
+				while Figure.Parent ~= nil do
+					local _, time = wait(0.1)
+					move(time)
+				end
+			end)
+		end
+	end
+end
+
+local GetZoom
+local SetZoom
+local GetShiftLockEnabled
+local SetShiftLockEnabled
+local SetCameraCFrame
+local BlockInputs
+local UnblockInputs
+local SetCursorIcon
+local SetCursorSize
+local SetCursorOffset
+local SetCursor
+do
+	VirtualInputManager:SendKeyEvent(true, 304, false, workspace)
+	wait()
+	VirtualInputManager:SendKeyEvent(true, 304, false, workspace)
+	wait()
+
+	local ZoomControllers = {}
+
+	do
+		for _,Table in pairs(getgc(true)) do
+			if type(Table) == "table" then
+				pcall(function()
+					if type(Table.SetCameraToSubjectDistance) == "function"
+					and type(Table.GetCameraToSubjectDistance) == "function"
+					and Table.FIRST_PERSON_DISTANCE_THRESHOLD
+					and Table.lastCameraTransform then
+						table.insert(ZoomControllers,Table)
+					end
+				end)
+			end
+		end
+		ConsoleMessage(tostring(#ZoomControllers).." ZoomController"..(#ZoomControllers == 1 and "" or "s"))
+	end
+
+	GetZoom = function()
+		for _,ZoomController in pairs(ZoomControllers) do
+			local Zoom = ZoomController:GetCameraToSubjectDistance()
+			if Zoom and Zoom ~= 12.5 then
+				return Zoom
+			end
+		end
+		return 12.5
+	end
+
+	SetZoom = function(Zoom)
+		for _,ZoomController in pairs(ZoomControllers) do
+			pcall(function()
+				ZoomController:SetCameraToSubjectDistance(Zoom)
+			end)
+		end
+	end
+
+	GetShiftLockEnabled = function()
+		return ShiftLockEnabled
+	end
+
+	SetShiftLockEnabled = function(Enabled)
+		if ShiftLockEnabled ~= Enabled then
+			ShiftLockEnabled = Enabled
+			if Enabled then
+				SetCursor("MouseLockedCursor")
+			else
+				SetCursor("ArrowFarCursor")
+			end
+			ContextActionService:CallFunction("MouseLockSwitchAction", Enum.UserInputState.Begin, game)
+		end
+	end
+
+	SetCameraCFrame = function(NewCFrame)
+		CameraCFrame = NewCFrame
+		workspace.CurrentCamera.CFrame = NewCFrame
+	end
+
+	local BlockGui = Instance.new("ScreenGui")
+	local BlockFrame = Instance.new("TextButton")
+	BlockFrame.Text = ""
+	BlockFrame.BackgroundTransparency = 1
+	BlockFrame.Size = UDim2.fromScale(1,1)
+	BlockFrame.Selectable = false
+	BlockFrame.Selected = false
+	BlockFrame.Parent = BlockGui
+	BlockGui.Enabled = false
+	BlockGui.Parent = GUIParent
+
+	BlockInputs = function()
+		BlockGui.Enabled = true
+	end
+	UnblockInputs = function()
+		BlockGui.Enabled = false
+	end
+
+	local CursorHolder = Instance.new("ScreenGui")
+	Cursor.BackgroundTransparency = 1
+	Cursor.ZIndex = math.huge
+	Cursor.Parent = CursorHolder
+	CursorHolder.ZIndexBehavior = Enum.ZIndexBehavior.Global
+	CursorHolder.Parent = GUIParent
+	Resolution = CursorHolder.AbsoluteSize
+
+	SetCursor = function(CursorName)
+		local CursorData = Cursors[CursorName]
+		CursorIcon = CursorData.Icon
+		CursorSize = CursorData.Size
+		CursorOffset = CursorData.Offset
+	end
+end
+
+local Freeze
+
+local GetReplayFile
+local ReplayEncode
+local ReplayDecode
+local RecordReplay
+local StartRecording
+local StopRecording
+local SaveRecording
+local DiscardRecording
+local StartReading
+local StopReading
+local GetCheckpoint
+local SetCheckpoint
+local GotoFrame
+do
+	GetReplayFile = function()
+		if not isfolder(string.split(FolderPath,"/")[1]) then
+			makefolder(string.split(FolderPath,"/")[1])
+		end
+		if not isfolder(FolderPath) then
+			makefolder(FolderPath)
+		end
+		if not isfile(ReplayPath) then
+			writefile(ReplayPath,ReplayFileBeginning)
+			return ReplayFileBeginning
+		end
+		return readfile(ReplayPath)
+	end
+
+	ReplayEncode = function(Table)
+		ConsoleMessage("Encoding "..tostring(#Table).." frames")
+		local StartTick = tick()
+		local Encoded = json.encode(Table)
+		ConsoleMessage("Done encoding in",RoundNumber(tick()-StartTick,2),"seconds")
+		return ReplayFileBeginning..Encoded..ReplayFileEnding
+	end
+
+	ReplayDecode = function(String)
+		if String == ReplayFileBeginning or String == ReplayFileBeginning..ReplayFileEnding then
+			ConsoleMessage("Nothing to read")
 			return
 		end
+		ConsoleMessage("Decoding "..tostring(#String).." characters")
+		local StartTick = tick()
+		local Decoded = json.decode(String)
+		ConsoleMessage("Done decoding in",RoundNumber(tick()-StartTick,2),"seconds")
+		return Decoded.Replay
+	end
 
-		if index < #frames then
-			state.frame = index + 1
+	RecordReplay = function()
+		ConsoleMessage("Waiting for input")
+		if Writing then
+			ConsoleMessage("Recording stopped")
+			StopRecording()
+			return
+		end
+		SetColorCodeFrame("WaitingForInput")
+		WaitForInput()
+		StartRecording()
+		ConsoleMessage("Recording started")
+	end
+
+	StartRecording = function()
+		if not Reading then
+			SetColorCodeFrame("Recording")
+			Writing = true
+		end
+	end
+
+	StopRecording = function()
+		if not Reading then
+			Writing = false
+		end
+	end
+
+	SaveToFile = function()
+		local ReplayEncoded = ReplayEncode(ReplayTable)
+		writefile(ReplayPath,ReplayEncoded)
+	end
+
+	SaveRecording = function()
+		if #RecordingTable > 0 then
+			for _,Frame in pairs(RecordingTable) do
+				table.insert(ReplayTable,Frame)
+			end
+			RecordingTable = {}
+			ConsoleMessage("Saved")
+		end
+	end
+
+	DiscardRecording = function()
+		if #RecordingTable > 0 then
+			RecordingTable = {}
+			ConsoleMessage("Discarded")
+		end
+	end
+
+	StartReading = function()
+		if not Reading then
+			SaveToFile()
+			ReplayTable = ReplayDecode(GetReplayFile())
+			if ReplayTable then
+				Freeze(false)
+				AnimateDisabled = true
+				workspace.Gravity = 0
+				ReplayTableIndex = 1
+				BlockInputs()
+				Reading = true
+				SetColorCodeFrame("Reading")
+				ConsoleMessage("Reading started")
+				ConsoleMessage("Length: "..RoundNumber(tostring(#ReplayTable/60)).." seconds")
+			else
+				ReplayTable = {}
+				SetColorCodeFrame("Idle")
+			end
 		else
-			state.isPlaying = false
-			applyFrozenFrame(index)
+			ConsoleMessage("You are already reading")
 		end
-	end)
+	end
 
-	updateGui()
+	StopReading = function()
+		if Reading then
+			UnblockInputs()
+			Character.Head.CanCollide = true
+			Character.Torso.CanCollide = true
+			Character.HumanoidRootPart.CanCollide = true
+			AnimateDisabled = false
+			Reading = false
+			Character.Humanoid.JumpPower = DefaultJumpPower
+			Character.Humanoid.WalkSpeed = DefaultWalkSpeed
+			workspace.Gravity = DefaultGravity
+			SetColorCodeFrame("Idle")
+			ConsoleMessage("Reading stopped")
+		else
+			ConsoleMessage("You are not reading")
+		end
+	end
 end
 
-local function clearRecording()
-	if state.mode == "recording" then
-		stopRecording()
+do
+	Freeze = function(NewFrozen,DoNotRecord)
+		if Frozen ~= NewFrozen and not Reading then
+			SeekDirection = 0
+			if NewFrozen then
+				Frozen = true
+				StopRecording()
+				SaveRecording()
+				FreezeFrame = #ReplayTable
+				SetColorCodeFrame("Frozen")
+			else
+				if DoNotRecord then
+					Frozen = false
+					SetColorCodeFrame("Idle")
+				else
+					for Index = #ReplayTable,FreezeFrame,-1 do
+						ReplayTable[Index] = nil
+					end
+					Frozen = false
+					StartRecording()
+					SetColorCodeFrame("Recording")
+				end
+			end
+		end
 	end
-	if state.mode == "replay" then
-		stopReplay()
-	end
-
-	frames = {}
-	state.frame = 1
-	updateGui()
 end
 
-local function parseFrameFromBox()
-	local num = tonumber(frameBox.Text)
-	if not num then
-		return nil
+local Commands = {}
+do
+	Commands["help"] = function(Args)
+		if Args == "help" then
+			ConsoleMessage("help <command>: Shows a list of all commands, or a specific command")
+		else
+			local Command = Args[1]
+			if Command then
+				Command = string.lower(Command)
+				if Commands[Command] then
+					Commands[Command]("help")
+				else
+					ConsoleMessage("Command", Command, "was not found")
+				end
+			else
+				for _,Command in pairs(Commands) do
+					Command("help")
+				end
+			end
+		end
 	end
-	return math.floor(num)
+
+	Commands["erase"] = function(Args)
+		if Args == "help" then
+			ConsoleMessage("erase: Erases all data from the folder",PlaceId)
+		else
+			writefile(ReplayPath,ReplayFileBeginning)
+			ReplayTable = {}
+			return ReplayPath.." has been erased"
+		end
+	end
+
+	Commands["setsdm"] = function(Args)
+		if Args == "help" then
+			ConsoleMessage("setsdm <number SeekDirectionMultiplier>: Sets speed multiplier when using R and T while frozen")
+		else
+			local Number = tonumber(Args[1]) or 1
+			if Number then
+				local OldValue = SeekDirectionMultiplier
+				SeekDirectionMultiplier = Number
+				return "SeekDirectionMultiplier has been set from "..tostring(OldValue).." to "..tostring(Number)
+			end
+		end
+	end
+
+	Commands["rejoin"] = function(Args)
+		if Args == "help" then
+			ConsoleMessage("rejoin <bool SaveReplay>: Rejoins the server; save replay optionally")
+		else
+			local SaveReplay = Args[1] and string.lower(Args[1])
+			ConsoleMessage("Saving...")
+			if SaveReplay == "true" or SaveReplay == "yes" or SaveReplay == "1" or SaveReplay == "save" then
+				SaveToFile()
+			end
+			ConsoleMessage("Rejoining...")
+			if #game.Players:GetPlayers() <= 1 then
+				game.Players.LocalPlayer:Kick("\nRejoining...")
+				wait()
+				game:GetService("TeleportService"):Teleport(game.PlaceId, game.Players.LocalPlayer)
+			else
+				game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, game.JobId, game.Players.LocalPlayer)
+			end
+			return "Sent request to rejoin"
+		end
+	end
+
+	Commands["invite"] = function(Args)
+		if Args == "help" then
+			ConsoleMessage("invite: Invites you to Tasability Discord")
+		else
+			request({
+				Url = "http://127.0.0.1:6463/rpc?v=1",
+				Method = "POST",
+				Headers = {
+					["Content-Type"] = "application/json",
+					["origin"] = "https://discord.com",
+				},
+				Body = game:GetService("HttpService"):JSONEncode({
+					["args"] = {
+						["code"] = "Shyfsc2cJ9",
+					},
+					["cmd"] = "INVITE_BROWSER",
+					["nonce"] = "."
+				})
+			})
+			return "Sent invite (if your exploit blocked it the invite is https://discord.gg/Shyfsc2cJ9)"
+		end
+	end
 end
 
-goButton.MouseButton1Click:Connect(function()
-	local num = parseFrameFromBox()
-	if not num then
-		return
+local StateChanged
+local CharacterAdded
+local InputBegan
+local InputChanged
+local InputEnded
+local RenderStepped
+local Stepped
+local ReadButton_MouseButton1Click
+local SaveToFileButton_MouseButton1Click
+local IdleButton_MouseButton1Click
+local CurrentPlaceIdButton_MouseButton1Click
+local CurrentCamera_Changed
+local CommandBar_FocusLost
+local CommandBar_MouseEnter
+local CommandBar_MouseLeave
+do
+	StateChanged = function(_,State)
+		table.insert(HumanoidStateQueue,State.Value)
 	end
-	goToFrame(num)
-end)
 
-frameBox.FocusLost:Connect(function(enterPressed)
-	if not enterPressed then
-		return
+	CharacterAdded = function(NewCharacter)
+		Humanoid = NewCharacter:WaitForChild("Humanoid")
+		Humanoid.StateChanged:Connect(StateChanged)
+		RootPart = NewCharacter:WaitForChild("HumanoidRootPart")
+		DefaultJumpPower = Humanoid.JumpPower
+		DefaultWalkSpeed = Humanoid.WalkSpeed
+		Reanimate(NewCharacter)
+		Character = NewCharacter
+		Humanoid.Died:Connect(function()
+			Dead = true
+		end)
+		Dead = false
 	end
 
-	local num = parseFrameFromBox()
-	if not num then
-		return
-	end
-	goToFrame(num)
-end)
+	InputBegan = function(Input,GameProcessed)
+		if IgnoreGameProcessed then
+			GameProcessed = false
+		end
 
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-	if not gameProcessed then
-		if input.UserInputType == Enum.UserInputType.Keyboard then
-			currentKeysDown[input.KeyCode.Name] = true
-		elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
-			currentMouseButtonsDown["MouseButton1"] = true
-		elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
-			currentMouseButtonsDown["MouseButton2"] = true
+		if Input.UserInputType == Enum.UserInputType.MouseButton1 then
+			table.insert(InputBeganQueue,"b1")
+		elseif Input.UserInputType == Enum.UserInputType.MouseButton2 then
+			table.insert(InputBeganQueue,"b2")
+		elseif Input.UserInputType == Enum.UserInputType.Keyboard then
+			local InputName = string.split(tostring(Input.KeyCode),".")[3]
+			if not InputBlacklist[InputName] then
+				table.insert(InputBeganQueue,InputName)
+			end
+		end
+
+		if Input.KeyCode == Enum.KeyCode.LeftShift and not Reading and not GameProcessed then
+			SetShiftLockEnabled(not ShiftLockEnabled)
+		end
+
+		if Input.KeyCode == Enum.KeyCode.E and not GameProcessed then
+			Freeze(not Frozen)
+		elseif Input.KeyCode == Enum.KeyCode.R and not GameProcessed then
+			if not Reading then
+				Freeze(true)
+				if SeekDirection == 0 then
+					SeekDirection = -1*SeekDirectionMultiplier
+				end
+			end
+		elseif Input.KeyCode == Enum.KeyCode.T and not GameProcessed then
+			if not Reading then
+				Freeze(true)
+				if SeekDirection == 0 then
+					SeekDirection = 1*SeekDirectionMultiplier
+				end
+			end
+		elseif Input.KeyCode == Enum.KeyCode.F and not GameProcessed then
+			Freeze(true)
+			if Frozen and SeekDirection == 0 then
+				local NewFreezeFrame = FreezeFrame - 1
+				if NewFreezeFrame > 0 and NewFreezeFrame <= #ReplayTable then
+					FreezeFrame = NewFreezeFrame
+				end
+			end
+		elseif Input.KeyCode == Enum.KeyCode.G and not GameProcessed then
+			Freeze(true)
+			if Frozen and SeekDirection == 0 then
+				local NewFreezeFrame = FreezeFrame + 1
+				if NewFreezeFrame > 0 and NewFreezeFrame <= #ReplayTable then
+					FreezeFrame = NewFreezeFrame
+				end
+			end
+		elseif Input.KeyCode == Enum.KeyCode.U and not GameProcessed then
+			MainFrame.Visible = not MainFrame.Visible
+		elseif Input.KeyCode == Enum.KeyCode.L and not GameProcessed then
+			StopReading()
+		elseif Input.KeyCode == Enum.KeyCode.P and not GameProcessed then
+			SaveToFile()
+		elseif Input.KeyCode == Enum.KeyCode.M and not GameProcessed then
+			IdleButton_MouseButton1Click()
 		end
 	end
 
-	if gameProcessed or input.UserInputType ~= Enum.UserInputType.Keyboard then
-		return
+	InputChanged = function(Input,GameProcessed)
+		-- mouse wheel recording disabled
 	end
 
-	local key = input.KeyCode
-
-	if key == Enum.KeyCode.Backspace then
-		clearRecording()
-		return
-	end
-
-	if key == Enum.KeyCode.J then
-		if state.mode == "idle" then
-			startRecordingFresh()
-		elseif state.mode == "recording" then
-			stopRecording()
+	InputEnded = function(Input,GameProcessed)
+		if Input.UserInputType == Enum.UserInputType.MouseButton1 then
+			table.insert(InputEndedQueue,"b1")
+		elseif Input.UserInputType == Enum.UserInputType.MouseButton2 then
+			table.insert(InputEndedQueue,"b2")
+		elseif Input.UserInputType == Enum.UserInputType.Keyboard then
+			local InputName = string.split(tostring(Input.KeyCode),".")[3]
+			table.insert(InputEndedQueue,InputName)
 		end
-		return
-	end
 
-	if key == Enum.KeyCode.N then
-		startReplayFromBeginning()
-		return
-	end
-
-	if key == Enum.KeyCode.E then
-		overwriteFromCurrentFrame()
-		return
-	end
-
-	if key == Enum.KeyCode.L then
-		if state.mode == "replay" then
-			stopReplay()
+		if Input.KeyCode == Enum.KeyCode.R then
+			if SeekDirection == -1*SeekDirectionMultiplier then
+				SeekDirection = 0
+			end
+		elseif Input.KeyCode == Enum.KeyCode.T then
+			if SeekDirection == 1*SeekDirectionMultiplier then
+				SeekDirection = 0
+			end
 		end
-		return
 	end
 
-	if key == Enum.KeyCode.F then
-		stepFrame(-1)
-		return
-	end
-
-	if key == Enum.KeyCode.V then
-		playOneNextFrame()
-		return
-	end
-
-	if key == Enum.KeyCode.R then
-		if #frames > 0 then
-			goToFrame(state.frame)
-			holdBack = true
-			holdForward = false
-			stepFrame(-fastScrubStep)
-			nextRepeatAt = os.clock() + firstRepeatDelay
+	RenderStepped = function(...)
+		for _,Function in pairs(RenderSteppedConnections) do
+			Function(...)
 		end
-		return
 	end
 
-	if key == Enum.KeyCode.T then
-		if #frames > 0 then
-			goToFrame(state.frame)
-			holdForward = true
-			holdBack = false
-			stepFrame(fastScrubStep)
-			nextRepeatAt = os.clock() + firstRepeatDelay
+	Stepped = function(...)
+		for _,Function in pairs(SteppedConnections) do
+			Function(...)
 		end
-		return
+	end
+
+	ReadButton_MouseButton1Click = function()
+		if ReplayStartTime >= 1 then
+			for i = ReplayStartTime,1,-1 do
+				ConsoleMessage("Reading in "..tostring(i).." seconds")
+				wait(1)
+			end
+		end
+		StartReading()
+	end
+
+	SaveToFileButton_MouseButton1Click = function()
+		SaveToFile()
+	end
+
+	IdleButton_MouseButton1Click = function()
+		if GetColorCodeFrame() == "Frozen" then
+			Freeze(false,true)
+		end
+	end
+
+	IgnoreGameProcessedButton_MouseButton1Click = function()
+		IgnoreGameProcessed = not IgnoreGameProcessed
+	end
+
+	CurrentPlaceIdButton_MouseButton1Click = function()
+		if string.find(CurrentPlaceIdButton.Text, "Place") then
+			local OldText = CurrentPlaceIdButton.Text
+			setclipboard(tostring(PlaceId))
+			CurrentPlaceIdButton.Text = "Copied id"
+			wait(.5)
+			CurrentPlaceIdButton.Text = OldText
+		end
+	end
+
+	CurrentCamera_Changed = function()
+		if Reading then
+			workspace.CurrentCamera.CFrame = CameraCFrame
+		end
+	end
+
+	CommandBar_FocusLost = function()
+		local Input = CommandBar.Text
+		local InputSplit = string.split(Input," ")
+		local Command = Commands[string.lower(InputSplit[1])]
+		if Command then
+			table.remove(InputSplit,1)
+			local ReturnMessage = Command(InputSplit)
+			if ReturnMessage then
+				ConsoleMessage(ReturnMessage)
+			end
+		else
+			ConsoleMessage("Command",InputSplit[1],"was not found")
+		end
+		CommandBar.Text = ""
+	end
+
+	CommandBar_MouseEnter = function()
+		CommandBar.BackgroundColor3 = Color3.new(0.2,0.2,0.2)
+	end
+
+	CommandBar_MouseLeave = function()
+		CommandBar.BackgroundColor3 = Color3.new(0,0,0)
+	end
+end
+
+do
+	RenderSteppedConnections.UpdateFreezeFrame = function()
+		RecordedFramesLabel.Text = RoundNumber(FreezeFrame,0)
+	end
+
+	RenderSteppedConnections.UpdateIgnoreGameProcessedButton = function()
+		if IgnoreGameProcessed then
+			IgnoreGameProcessedButton.BackgroundColor3 = Color3.new(0.5,1,0.5)
+		else
+			IgnoreGameProcessedButton.BackgroundColor3 = Color3.new(1,0.5,0.5)
+		end
+	end
+
+	RenderSteppedConnections.SeekDirectionHandler = function()
+		if Frozen then
+			local NewFreezeFrame = FreezeFrame + SeekDirection
+			if NewFreezeFrame < 1 then
+				FreezeFrame = 1
+			elseif NewFreezeFrame > #ReplayTable then
+				FreezeFrame = #ReplayTable
+			else
+				FreezeFrame = NewFreezeFrame
+			end
+		end
+	end
+
+	SteppedConnections.UpdateInputPreview = function()
+		for _,Input in pairs(InputBeganQueue) do
+			Pressed[Input] = true
+		end
+		for _,Input in pairs(InputEndedQueue) do
+			Pressed[Input] = nil
+		end
+		PressedKeysLabel.Text = "|"
+		for Input,_ in pairs(Pressed) do
+			PressedKeysLabel.Text = PressedKeysLabel.Text..Input.."|"
+		end
+	end
+end
+
+do
+	UserInputService.InputBegan:Connect(InputBegan)
+	UserInputService.InputChanged:Connect(InputChanged)
+	UserInputService.InputEnded:Connect(InputEnded)
+	RunService.RenderStepped:Connect(RenderStepped)
+	RunService.Stepped:Connect(Stepped)
+	Player.CharacterAdded:Connect(CharacterAdded)
+	ReadButton.MouseButton1Click:Connect(ReadButton_MouseButton1Click)
+	SaveToFileButton.MouseButton1Click:Connect(SaveToFileButton_MouseButton1Click)
+	IdleButton.MouseButton1Click:Connect(IdleButton_MouseButton1Click)
+	CurrentPlaceIdButton.MouseButton1Click:Connect(CurrentPlaceIdButton_MouseButton1Click)
+	IgnoreGameProcessedButton.MouseButton1Click:Connect(IgnoreGameProcessedButton_MouseButton1Click)
+	workspace.CurrentCamera.Changed:Connect(CurrentCamera_Changed)
+	CommandBar.FocusLost:Connect(CommandBar_FocusLost)
+	CommandBar.MouseEnter:Connect(CommandBar_MouseEnter)
+	CommandBar.MouseLeave:Connect(CommandBar_MouseLeave)
+end
+
+do
+	GetReplayFile()
+	SetCursor("ArrowFarCursor")
+	UserInputService.MouseIconEnabled = false
+	DefaultGravity = workspace.Gravity
+	ShiftLockBoundKeys.Value = ""
+	CharacterAdded(Player.Character)
+	Dragify(MainFrame)
+	SetColorCodeFrame("Idle")
+	GUI.Parent = GUIParent
+end
+
+spawn(function()
+	while true do
+		if Reading then
+			local Frame = ReplayTable[ReplayTableIndex]
+
+			if Frame == 0 then
+				Humanoid:ChangeState(15)
+				for _,Descendant in pairs(Character:GetDescendants()) do
+					if Descendant:IsA("BasePart") then
+						Descendant:Destroy()
+					end
+				end
+				repeat wait() until not Dead
+				RunService.Heartbeat:Wait()
+				ReplayTableIndex = ReplayTableIndex + 1
+				continue
+			elseif Frame == 1 then
+				Humanoid:ChangeState(15)
+				workspace.Gravity = DefaultGravity
+				repeat wait() until not Dead
+				RunService.Heartbeat:Wait()
+				ReplayTableIndex = ReplayTableIndex + 1
+				continue
+			end
+			if not Frame then
+				StopReading()
+				continue
+			end
+
+			AnimateDisabled = true
+			workspace.Gravity = 0
+			Character.Humanoid.JumpPower = 0
+			Character.Humanoid.WalkSpeed = 0
+
+			if not Character:FindFirstChild("HumanoidRootPart") then
+				RunService.Heartbeat:Wait()
+				continue
+			end
+
+			local HumanoidRootPartCFrame = TableToCFrame(Frame[1])
+			local Animations = Frame[2]
+			local AnimationSpeed = Frame[3]
+			local HumanoidState = Frame[4]
+			local HumanoidRootPartVelocity = TableToVector3(Frame[5])
+			local HumanoidRootPartRotVelocity = TableToVector3(Frame[6])
+			local CurrentCameraCFrame = TableToCFrame(Frame[7])
+			local Zoom = Frame[8]
+			local AnimatePose = Frame[9]
+			local FrameShiftLockEnabled = (Frame[10] == 1 and true) or false
+			local MouseLocation = TableToVector2(Frame[11])
+			local FrameInputBeganQueue = Frame[12][1]
+			local FrameInputEndedQueue = Frame[12][2]
+
+			local CurrentState = Humanoid:GetState().Value
+
+			SetCameraCFrame(CurrentCameraCFrame)
+			SetZoom(Zoom)
+
+			Humanoid:ChangeState(HumanoidState)
+
+			pose = AnimatePose
+			for _,Arguments in pairs(Animations) do
+				local Animation = Arguments[1]
+				local TransitionTime = Arguments[2]
+				if Animation == "walk" then
+					if Humanoid.FloorMaterial ~= Enum.Material.Air and CurrentState ~= 3 then
+						playAnimation("walk",TransitionTime,Humanoid,true)
+					end
+				else
+					playAnimation(Animation,TransitionTime,Humanoid,true)
+				end
+			end
+
+			pcall(setAnimationSpeed,AnimationSpeed)
+
+			if FrameShiftLockEnabled then
+				SetShiftLockEnabled(true)
+			else
+				SetShiftLockEnabled(false)
+			end
+
+			if PlaybackMouseLocation and not FrameShiftLockEnabled and Zoom > 0.52 then
+				mousemoveabs(MouseLocation.X,MouseLocation.Y)
+			else
+				mousemoveabs((Resolution.X/2)+CursorOffset.X-GuiInset.X,(Resolution.Y/2)+CursorOffset.Y-GuiInset.Y-36)
+			end
+
+			if PlaybackInputs then
+				for _,Input in pairs(FrameInputBeganQueue) do
+					local Code = InputCodes[Input]
+					if Code then
+						keypress(Code)
+					else
+						if Input == "b1" then
+							mouse1press()
+						elseif Input == "b2" then
+							mouse2press()
+						else
+							ConsoleMessage(tostring(Input).." was not found in InputCodes and will not be pressed")
+						end
+					end
+				end
+				for _,Input in pairs(FrameInputEndedQueue) do
+					local Code = InputCodes[Input]
+					if Code then
+						keyrelease(Code)
+					else
+						if Input == "b1" then
+							mouse1release()
+						elseif Input == "b2" then
+							mouse2release()
+						else
+							ConsoleMessage(tostring(Input).." was not found in InputCodes and will not be released")
+						end
+					end
+				end
+			end
+
+			Character.HumanoidRootPart.CFrame = HumanoidRootPartCFrame
+			ReplayTableIndex = ReplayTableIndex + 1
+		end
+		RunService.Heartbeat:Wait()
 	end
 end)
 
-UserInputService.InputChanged:Connect(function(input, gameProcessed)
-	if gameProcessed then
-		return
-	end
+spawn(function()
+	while true do
+		if Reading then
+			if workspace.Gravity ~= DefaultGravity then
+				for _,v in pairs(Character:GetChildren()) do
+					if v:IsA("BasePart") then
+						v.CanCollide = false
+					end
+				end
+			end
 
-	if input.UserInputType == Enum.UserInputType.MouseMovement then
-		local d = input.Delta
-		currentMouseDelta += Vector2.new(d.X, d.Y)
-	elseif input.UserInputType == Enum.UserInputType.MouseWheel then
-		currentMouseWheel += input.Position.Z
-	end
-end)
+			if not Character:FindFirstChild("HumanoidRootPart") then
+				RunService.Stepped:Wait()
+				continue
+			end
 
-UserInputService.InputEnded:Connect(function(input, gameProcessed)
-	if not gameProcessed then
-		if input.UserInputType == Enum.UserInputType.Keyboard then
-			currentKeysDown[input.KeyCode.Name] = nil
-		elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
-			currentMouseButtonsDown["MouseButton1"] = nil
-		elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
-			currentMouseButtonsDown["MouseButton2"] = nil
+			local Frame = ReplayTable[ReplayTableIndex]
+			if Frame and type(Frame) == "table" then
+				local HumanoidRootPartCFrame = TableToCFrame(Frame[1])
+				Character.HumanoidRootPart.CFrame = HumanoidRootPartCFrame
+			end
+		else
+			workspace.Gravity = DefaultGravity
 		end
-	end
-
-	if input.UserInputType ~= Enum.UserInputType.Keyboard then
-		return
-	end
-
-	local key = input.KeyCode
-	if key == Enum.KeyCode.R then
-		holdBack = false
-	elseif key == Enum.KeyCode.T then
-		holdForward = false
+		RunService.Stepped:Wait()
 	end
 end)
 
-scrubConn = RunService.RenderStepped:Connect(function()
-	if #frames == 0 then
-		return
-	end
-
-	local now = os.clock()
-
-	if holdBack and now >= nextRepeatAt then
-		stepFrame(-fastScrubStep)
-		nextRepeatAt = now + repeatDelay
-	elseif holdForward and now >= nextRepeatAt then
-		stepFrame(fastScrubStep)
-		nextRepeatAt = now + repeatDelay
+spawn(function()
+	while true do
+		if Reading then
+			if not Character:FindFirstChild("HumanoidRootPart") then
+				RunService.RenderStepped:Wait()
+				continue
+			end
+		end
+		RunService.RenderStepped:Wait()
 	end
 end)
 
-updateGui()
+spawn(function()
+	while true do
+		if Writing then
+			if (not Character or not Character.Parent) or (not Character:FindFirstChild("HumanoidRootPart")) then
+				if type(RecordingTable[#RecordingTable]) == "table" then
+					table.insert(RecordingTable,0)
+				end
+				RunService.RenderStepped:Wait()
+				continue
+			end
+			if (Humanoid.Health == 0) then
+				if type(RecordingTable[#RecordingTable]) == "table" then
+					table.insert(RecordingTable,1)
+				end
+				RunService.RenderStepped:Wait()
+				continue
+			end
+			local Frame = {}
+			Frame[1] = RoundTable(CFrameToTable(Character.HumanoidRootPart.CFrame),RoundDigits)
+			Frame[2] = AnimationQueue
+			Frame[3] = RoundNumber(currentAnimSpeed,RoundDigits)
+			Frame[4] = Humanoid:GetState().Value
+			Frame[5] = RoundTable(Vector3ToTable(Character.HumanoidRootPart.Velocity),RoundDigits)
+			Frame[6] = RoundTable(Vector3ToTable(Character.HumanoidRootPart.RotVelocity),RoundDigits)
+			Frame[7] = RoundTable(CFrameToTable(workspace.CurrentCamera.CFrame),RoundDigits)
+			Frame[8] = RoundNumber(GetZoom(),RoundDigits)
+			Frame[9] = pose
+			Frame[10] = (GetShiftLockEnabled() and 1) or 0
+			Frame[11] = RoundTable(Vector2ToTable(UserInputService:GetMouseLocation()),RoundDigits)
+			Frame[12] = {InputBeganQueue,InputEndedQueue}
+			table.insert(RecordingTable,Frame)
+		end
+		AnimationQueue = {}
+		RunSpeed = 0
+		ClimbSpeed = 0
+		HumanoidStateQueue = {}
+		if setfpscap then
+			setfpscap(60)
+		end
+		RunService.RenderStepped:Wait()
+	end
+end)
+
+RunService.Heartbeat:Connect(function()
+	InputBeganQueue = {}
+	InputEndedQueue = {}
+end)
+
+spawn(function()
+	while true do
+		Cursor.Image = CursorIcon
+		Cursor.Size = CursorSize
+		local MouseLocation = UserInputService:GetMouseLocation()
+		if UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter then
+			Cursor.Position = UDim2.fromOffset((Resolution.X/2)+CursorOffset.X-GuiInset.X,(Resolution.Y/2)+CursorOffset.Y-GuiInset.Y-18)
+		else
+			Cursor.Position = UDim2.fromOffset(MouseLocation.X+CursorOffset.X-GuiInset.X,MouseLocation.Y+CursorOffset.Y-GuiInset.Y-36)
+		end
+		RunService.RenderStepped:Wait()
+	end
+end)
+
+spawn(function()
+	while true do
+		if Frozen then
+			Character.HumanoidRootPart.Anchored = true
+			if FreezeFrame > 0 and FreezeFrame <= #ReplayTable then
+				local RoundedFreezeFrame = RoundNumber(FreezeFrame,0)
+				local Frame = ReplayTable[RoundedFreezeFrame]
+
+				if type(Frame) == "table" then
+					local AnimatePose
+					local Animation
+
+					for Index = RoundedFreezeFrame,1,-1 do
+						if AnimatePose and Animation then
+							break
+						end
+						local BackFrame = ReplayTable[Index]
+						if type(BackFrame) == "table" then
+							AnimatePose = BackFrame[9]
+							Animation = BackFrame[2][#BackFrame[2]]
+						end
+					end
+
+					local CurrentPressedKeys = {}
+					for Index = RoundedFreezeFrame-math.max(FrameBacktrackCount,0),RoundedFreezeFrame do
+						local BackFrame = ReplayTable[Index]
+						if BackFrame and type(BackFrame) == "table" then
+							local BeganInputs,EndedInputs = unpack(BackFrame[12])
+
+							for _,Key in pairs(BeganInputs) do
+								CurrentPressedKeys[Key] = true
+							end
+
+							for _,Key in pairs(EndedInputs) do
+								CurrentPressedKeys[Key] = nil
+							end
+						end
+					end
+
+					WritingPressedKeysLabel.Text = "|"
+					for Input,_ in pairs(CurrentPressedKeys) do
+						WritingPressedKeysLabel.Text = WritingPressedKeysLabel.Text..Input.."|"
+					end
+
+					local HumanoidRootPartCFrame = TableToCFrame(Frame[1])
+					local AnimationSpeed = Frame[3]
+					local HumanoidState = Frame[4]
+					local HumanoidRootPartVelocity = TableToVector3(Frame[5])
+					local HumanoidRootPartRotVelocity = TableToVector3(Frame[6])
+					local FreezeCameraCFrame = TableToCFrame(Frame[7])
+					local Zoom = Frame[8]
+					local FreezeShiftLockEnabled = (Frame[10] == 1 and true) or false
+					local MouseLocation = TableToVector2(Frame[11])
+
+					local CurrentState = Humanoid:GetState().Value
+
+					if Animation then
+						if Animation[1] == "walk" then
+							if Humanoid.FloorMaterial ~= Enum.Material.Air and CurrentState ~= 3 then
+								playAnimation("walk",Animation[2],Humanoid,true)
+							end
+						else
+							playAnimation(Animation[1],Animation[2],Humanoid,true)
+						end
+					end
+					pcall(setAnimationSpeed,AnimationSpeed)
+					pose = AnimatePose
+
+					Humanoid:ChangeState(HumanoidState)
+					Character.HumanoidRootPart.Velocity = HumanoidRootPartVelocity
+					Character.HumanoidRootPart.RotVelocity = HumanoidRootPartRotVelocity
+					Character.HumanoidRootPart.CFrame = HumanoidRootPartCFrame
+					workspace.CurrentCamera.CFrame = FreezeCameraCFrame
+					SetZoom(Zoom)
+					if FreezeShiftLockEnabled ~= GetShiftLockEnabled() then
+						SetShiftLockEnabled(FreezeShiftLockEnabled)
+					end
+					if PlaybackMouseLocation then
+						mousemoveabs(MouseLocation.X,MouseLocation.Y)
+					end
+				else
+					RunService.RenderStepped:Wait()
+				end
+			end
+		else
+			pcall(function()
+				Character.HumanoidRootPart.Anchored = false
+			end)
+		end
+		RunService.RenderStepped:Wait()
+	end
+end)
+
+do
+	ConsoleMessage("Loading from file...")
+	ReplayTable = ReplayDecode(GetReplayFile())
+	if not ReplayTable then
+		ReplayTable = {}
+		ConsoleMessage("There is no replay folder for",PlaceId)
+	end
+end
+
+ConsoleMessage("Tasability",Version,"loaded in",RoundNumber(tick()-ExecutionTick,2),"seconds")
+ConsoleMessage("Type help to see all commands")
