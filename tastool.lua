@@ -1,11 +1,12 @@
 --[[
-TAS Lite v0.7 (Roblox, LocalScript/executor)
+TAS Lite v0.8 (Roblox, LocalScript/executor)
 - Stable record/playback timing
 - Freeze/seek with safe frame indexing
 - Checkpoints + append recording mode
 - Save/load JSON (backward compatible with v0.1/v0.2 frames)
 - On-screen log + record freeze/trim indicators
 - Playback mode: ghost (exact) or physics (with collisions)
+- Physics mode tuned for more human-like motion
 
 Hotkeys:
 F8  - start/stop record
@@ -17,6 +18,7 @@ F   - previous frame (when frozen, record/playback)
 G   - next frame (when frozen, record/playback)
 R/T - hold to seek backward/forward (auto-freezes if needed)
 U   - toggle status UI
+F2  - force hide/show GUI
 C   - set quick checkpoint (record/playback)
 V   - goto quick checkpoint (record/playback)
 Slash (/) - focus command bar
@@ -28,9 +30,11 @@ local CONFIG = {
 	SEEK_SPEED = 1, -- frames per render step while holding R/T
 	PLAYBACK_SPEED = 1, -- realtime multiplier
 	PLAYBACK_MODE = "physics", -- "ghost" | "physics"
-	PHYSICS_LERP_DISTANCE = 1.5,
-	PHYSICS_SNAP_DISTANCE = 8,
-	PHYSICS_LERP_ALPHA = 0.35,
+	PHYSICS_SNAP_DISTANCE = 12,
+	PHYSICS_SOFT_CORRECTION_GAIN = 6.5,
+	PHYSICS_MAX_CORRECTION_SPEED = 22,
+	PHYSICS_VELOCITY_BLEND = 0.25,
+	PHYSICS_ORIENTATION_BLEND = 0.2,
 	LOG_LINES = 8,
 	FOLDER = "TASLite",
 	FILE_NAME = "Replay.json",
@@ -51,6 +55,7 @@ local frames = {}
 local playIndex = 1
 local heldKeys = {}
 local uiVisible = true
+local forceHideUI = false
 local seekSpeed = CONFIG.SEEK_SPEED
 local recordMode = "replace" -- replace | append
 local checkpoints = {}
@@ -202,8 +207,8 @@ local function applyPlaybackLock()
 
 	hum.WalkSpeed = 0
 	hum.JumpPower = 0
-	hum.AutoRotate = false
-	if playbackMode == "ghost" then
+	hum.AutoRotate = (playbackMode == "physics")
+	if frozen or playbackMode == "ghost" then
 		hrp.Anchored = true
 	else
 		hrp.Anchored = false
@@ -318,17 +323,33 @@ local function applyFrame(i)
 		return false
 	end
 
-	if playbackMode == "ghost" then
+	if playbackMode == "ghost" or frozen then
 		hrp.CFrame = rootCF
 		hrp.AssemblyLinearVelocity = tableToV3(frame.vel)
 	else
 		local targetVel = tableToV3(frame.vel)
-		hrp.AssemblyLinearVelocity = targetVel
-		local dist = (hrp.Position - rootCF.Position).Magnitude
+		local posError = rootCF.Position - hrp.Position
+		local dist = posError.Magnitude
+
 		if dist > CONFIG.PHYSICS_SNAP_DISTANCE then
 			hrp.CFrame = rootCF
-		elseif dist > CONFIG.PHYSICS_LERP_DISTANCE then
-			hrp.CFrame = hrp.CFrame:Lerp(rootCF, CONFIG.PHYSICS_LERP_ALPHA)
+			hrp.AssemblyLinearVelocity = targetVel
+		else
+			local correctionVel = posError * CONFIG.PHYSICS_SOFT_CORRECTION_GAIN
+			local correctionMag = correctionVel.Magnitude
+			if correctionMag > CONFIG.PHYSICS_MAX_CORRECTION_SPEED and correctionMag > 0 then
+				correctionVel = correctionVel.Unit * CONFIG.PHYSICS_MAX_CORRECTION_SPEED
+			end
+
+			local desiredVel = targetVel + correctionVel
+			hrp.AssemblyLinearVelocity = hrp.AssemblyLinearVelocity:Lerp(desiredVel, CONFIG.PHYSICS_VELOCITY_BLEND)
+
+			-- Keep orientation close to recorded run without hard snapping position every frame.
+			local currentPos = hrp.Position
+			local targetRot = rootCF - rootCF.Position
+			local targetOrientCF = CFrame.new(currentPos) * targetRot
+			local blendedOrientCF = hrp.CFrame:Lerp(targetOrientCF, CONFIG.PHYSICS_ORIENTATION_BLEND)
+			hrp.CFrame = CFrame.new(currentPos) * (blendedOrientCF - blendedOrientCF.Position)
 		end
 	end
 	camera.CFrame = camCF
@@ -339,7 +360,7 @@ end
 local function statusText()
 	local recordFreezeText = (mode == "record" and frozen and "ON") or "OFF"
 	return string.format(
-		"Mode: %s | Frozen: %s | RecFreeze: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  R/T Seek  C/V Checkpoint  / Command  U UI",
+		"Mode: %s | Frozen: %s | RecFreeze: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  R/T Seek  C/V Checkpoint  / Command  U UI  F2 Hide",
 		mode,
 		tostring(frozen),
 		recordFreezeText,
@@ -414,7 +435,7 @@ gui.Parent = getUIParent()
 
 local function updateUI()
 	label.Text = statusText()
-	gui.Enabled = uiVisible
+	gui.Enabled = (uiVisible and not forceHideUI)
 end
 
 local function getCurrentFrameIndex()
@@ -579,7 +600,7 @@ end
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.7",
+		version = "0.8",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
@@ -770,6 +791,15 @@ UIS.InputBegan:Connect(function(input, gp)
 		heldKeys[input.KeyCode.Name] = true
 	end
 
+	if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.F2 then
+		forceHideUI = not forceHideUI
+		if forceHideUI and commandBar:IsFocused() then
+			commandBar:ReleaseFocus()
+		end
+		updateUI()
+		return
+	end
+
 	if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.Slash then
 		commandBar:CaptureFocus()
 	end
@@ -935,8 +965,9 @@ player.CharacterAdded:Connect(function()
 	end
 end)
 
-log("Loaded v0.7. PlaceId: " .. tostring(game.PlaceId))
+log("Loaded v0.8. PlaceId: " .. tostring(game.PlaceId))
 log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics')")
 log("Playback hotkey moved to F10")
+log("Press F2 to force hide/show GUI")
 log("Type '/' to open command bar, then use 'help'")
 updateUI()
