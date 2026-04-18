@@ -1,5 +1,5 @@
 --[[
-TAS Lite v0.8 (Roblox, LocalScript/executor)
+TAS Lite v0.7.1 (Roblox, LocalScript/executor)
 - Stable record/playback timing
 - Freeze/seek with safe frame indexing
 - Checkpoints + append recording mode
@@ -47,6 +47,7 @@ local HttpService = game:GetService("HttpService")
 
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
+local isTouchDevice = UIS.TouchEnabled and not UIS.MouseEnabled
 
 local mode = "idle" -- idle | record | play
 local frozen = false
@@ -74,6 +75,18 @@ local playbackState = {
 	hrp = nil,
 	saved = nil,
 }
+
+local function isShiftLockActive()
+	return UIS.MouseBehavior == Enum.MouseBehavior.LockCenter
+end
+
+local function shouldReplayDriveCamera()
+	-- On touch devices in physics mode, keep camera user-driven for natural control.
+	if playbackMode == "physics" and isTouchDevice and not frozen then
+		return false
+	end
+	return true
+end
 
 local recordFreezeState = {
 	active = false,
@@ -181,7 +194,11 @@ end
 
 local function setCameraPlaybackMode(enabled)
 	if enabled then
-		camera.CameraType = Enum.CameraType.Scriptable
+		if shouldReplayDriveCamera() then
+			camera.CameraType = Enum.CameraType.Scriptable
+		else
+			camera.CameraType = Enum.CameraType.Custom
+		end
 	else
 		camera.CameraType = Enum.CameraType.Custom
 	end
@@ -202,6 +219,7 @@ local function applyPlaybackLock()
 			JumpPower = hum.JumpPower,
 			AutoRotate = hum.AutoRotate,
 			Anchored = hrp.Anchored,
+			MouseBehavior = UIS.MouseBehavior,
 		}
 	end
 
@@ -232,6 +250,9 @@ local function clearPlaybackLock()
 	end
 	if hrp and hrp.Parent and saved then
 		hrp.Anchored = saved.Anchored
+	end
+	if saved and saved.MouseBehavior then
+		UIS.MouseBehavior = saved.MouseBehavior
 	end
 
 	playbackState.active = false
@@ -285,6 +306,7 @@ local function normalizeFrame(rawFrame)
 			vel = rawFrame.vel or { 0, 0, 0 },
 			cam = rawFrame.cam,
 			fov = tonumber(rawFrame.fov) or 70,
+			shiftlock = (rawFrame.shiftlock == true),
 			keys = type(rawFrame.keys) == "table" and rawFrame.keys or {},
 		}
 	end
@@ -323,6 +345,10 @@ local function applyFrame(i)
 		return false
 	end
 
+	if not isTouchDevice then
+		UIS.MouseBehavior = (frame.shiftlock == true) and Enum.MouseBehavior.LockCenter or Enum.MouseBehavior.Default
+	end
+
 	if playbackMode == "ghost" or frozen then
 		hrp.CFrame = rootCF
 		hrp.AssemblyLinearVelocity = tableToV3(frame.vel)
@@ -352,7 +378,9 @@ local function applyFrame(i)
 			hrp.CFrame = CFrame.new(currentPos) * (blendedOrientCF - blendedOrientCF.Position)
 		end
 	end
-	camera.CFrame = camCF
+	if shouldReplayDriveCamera() then
+		camera.CFrame = camCF
+	end
 	camera.FieldOfView = tonumber(frame.fov) or 70
 	return true
 end
@@ -485,6 +513,7 @@ local function captureFrame(dt)
 		vel = roundArray(v3ToTable(hrp.AssemblyLinearVelocity), CONFIG.ROUND_DIGITS),
 		cam = roundArray(cfToTable(camera.CFrame), CONFIG.ROUND_DIGITS),
 		fov = round(camera.FieldOfView, CONFIG.ROUND_DIGITS),
+		shiftlock = isShiftLockActive(),
 		keys = keysSnapshot(),
 	}
 	table.insert(frames, frame)
@@ -535,6 +564,11 @@ local function setFrozen(newFrozen)
 	end
 
 	frozen = newFrozen
+
+	if mode == "play" then
+		setCameraPlaybackMode(true)
+		applyPlaybackLock()
+	end
 end
 
 local function startRecord()
@@ -600,7 +634,7 @@ end
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.8",
+		version = "0.7.1",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
@@ -717,6 +751,7 @@ local function runCommand(raw)
 		end
 		playbackMode = newMode
 		if mode == "play" then
+			setCameraPlaybackMode(true)
 			applyPlaybackLock()
 		end
 		log("Playback mode set to " .. playbackMode)
@@ -965,7 +1000,7 @@ player.CharacterAdded:Connect(function()
 	end
 end)
 
-log("Loaded v0.8. PlaceId: " .. tostring(game.PlaceId))
+log("Loaded v0.7.1. PlaceId: " .. tostring(game.PlaceId))
 log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics')")
 log("Playback hotkey moved to F10")
 log("Press F2 to force hide/show GUI")
