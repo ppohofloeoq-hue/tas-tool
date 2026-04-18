@@ -1,5 +1,5 @@
 --[[
-TAS Lite v0.5 (Roblox, LocalScript/executor)
+TAS Lite v0.6 (Roblox, LocalScript/executor)
 - Stable record/playback timing
 - Freeze/seek with safe frame indexing
 - Checkpoints + append recording mode
@@ -14,7 +14,7 @@ F7  - load replay from file
 E   - freeze/unfreeze (during record/playback)
 F   - previous frame (when frozen, record/playback)
 G   - next frame (when frozen, record/playback)
-R/T - hold to seek backward/forward (when frozen, record/playback)
+R/T - hold to seek backward/forward (auto-freezes if needed)
 U   - toggle status UI
 C   - set quick checkpoint (record/playback)
 V   - goto quick checkpoint (record/playback)
@@ -479,6 +479,14 @@ local function setFrozen(newFrozen)
 		else
 			trimFutureFrames()
 			clearRecordFreezeLock()
+			local hum, hrp = humanoidAndRoot()
+			if hrp then
+				-- Safety unstick: explicitly release anchor and resume gravity state.
+				hrp.Anchored = false
+			end
+			if hum then
+				hum:ChangeState(Enum.HumanoidStateType.Freefall)
+			end
 			playIndex = #frames
 		end
 	end
@@ -549,7 +557,7 @@ end
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.5",
+		version = "0.6",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
@@ -774,11 +782,17 @@ UIS.InputBegan:Connect(function(input, gp)
 			applyFrame(playIndex)
 		end
 	elseif kc == Enum.KeyCode.R then
-		if (mode == "play" or mode == "record") and frozen then
+		if mode == "play" or mode == "record" then
+			if not frozen then
+				setFrozen(true)
+			end
 			seekDir = -1
 		end
 	elseif kc == Enum.KeyCode.T then
-		if (mode == "play" or mode == "record") and frozen then
+		if mode == "play" or mode == "record" then
+			if not frozen then
+				setFrozen(true)
+			end
 			seekDir = 1
 		end
 	elseif kc == Enum.KeyCode.C then
@@ -884,7 +898,7 @@ player.CharacterAdded:Connect(function()
 	end
 end)
 
-log("Loaded v0.5. PlaceId: " .. tostring(game.PlaceId))
+log("Loaded v0.6. PlaceId: " .. tostring(game.PlaceId))
 log("Playback hotkey moved to F10")
 log("Type '/' to open command bar, then use 'help'")
 updateUI()
