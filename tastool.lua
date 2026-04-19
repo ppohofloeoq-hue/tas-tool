@@ -1,5 +1,5 @@
 --[[
-TAS Lite v0.7.4 (Roblox, LocalScript/executor)
+TAS Lite v0.8 (Roblox, LocalScript/executor)
 - Stable record/playback timing
 - Freeze/seek with safe frame indexing
 - Checkpoints + append recording mode
@@ -28,14 +28,16 @@ local CONFIG = {
 	ROUND_DIGITS = 3,
 	DEFAULT_FRAME_DT = 1 / 60,
 	FIXED_RECORD_DT = true, -- Ignore render lag while recording for stable playback speed.
+	RECORD_NO_COLLISION = true, -- Disable character collisions while recording.
 	SEEK_SPEED = 1, -- frames per render step while holding T/Y
 	PLAYBACK_SPEED = 1, -- realtime multiplier
-	PLAYBACK_MODE = "ghost", -- "ghost" | "physics"
-	PHYSICS_SNAP_DISTANCE = 12,
-	PHYSICS_SOFT_CORRECTION_GAIN = 6.5,
-	PHYSICS_MAX_CORRECTION_SPEED = 22,
-	PHYSICS_VELOCITY_BLEND = 0.25,
-	PHYSICS_ORIENTATION_BLEND = 0.2,
+	PLAYBACK_MODE = "physics", -- "ghost" | "physics"
+	PHYSICS_SNAP_DISTANCE = 10,
+	PHYSICS_SOFT_PULL_DISTANCE = 1.25,
+	PHYSICS_SOFT_CORRECTION_GAIN = 7.0,
+	PHYSICS_MAX_CORRECTION_SPEED = 26,
+	PHYSICS_VELOCITY_BLEND = 0.55,
+	PHYSICS_CORRECTION_BLEND = 0.35,
 	LOG_LINES = 8,
 	FOLDER = "TASLite",
 	FILE_NAME = "Replay.json",
@@ -71,12 +73,18 @@ local logLines = {}
 local logLabel
 local shiftLockState = false
 local fixedRecordDt = CONFIG.FIXED_RECORD_DT
+local recordNoCollisionEnabled = CONFIG.RECORD_NO_COLLISION
 
 local playbackState = {
 	active = false,
 	humanoid = nil,
 	hrp = nil,
 	saved = nil,
+}
+
+local recordNoCollisionState = {
+	active = false,
+	partTouch = {},
 }
 
 local function isShiftLockActive()
@@ -234,9 +242,15 @@ local function applyPlaybackLock()
 		}
 	end
 
-	hum.WalkSpeed = 0
-	hum.JumpPower = 0
-	hum.AutoRotate = (playbackMode == "physics")
+	if playbackMode == "physics" and not frozen then
+		hum.WalkSpeed = playbackState.saved.WalkSpeed
+		hum.JumpPower = playbackState.saved.JumpPower
+		hum.AutoRotate = true
+	else
+		hum.WalkSpeed = 0
+		hum.JumpPower = 0
+		hum.AutoRotate = false
+	end
 	if frozen or playbackMode == "ghost" then
 		hrp.Anchored = true
 	else
@@ -302,6 +316,43 @@ local function clearRecordFreezeLock()
 	recordFreezeState.active = false
 	recordFreezeState.hrp = nil
 	recordFreezeState.anchored = nil
+end
+
+local function applyRecordNoCollision()
+	if not recordNoCollisionEnabled then
+		return
+	end
+
+	local c = player.Character
+	if not c then
+		return
+	end
+
+	recordNoCollisionState.active = true
+	for _, inst in ipairs(c:GetDescendants()) do
+		if inst:IsA("BasePart") then
+			-- Keep real collisions for natural movement/animations; disable touch triggers while recording.
+			if recordNoCollisionState.partTouch[inst] == nil then
+				recordNoCollisionState.partTouch[inst] = inst.CanTouch
+			end
+			inst.CanTouch = false
+		end
+	end
+end
+
+local function clearRecordNoCollision()
+	if not recordNoCollisionState.active then
+		return
+	end
+
+	for part, oldValue in pairs(recordNoCollisionState.partTouch) do
+		if part and part.Parent then
+			part.CanTouch = (oldValue == true)
+		end
+	end
+
+	recordNoCollisionState.partTouch = {}
+	recordNoCollisionState.active = false
 end
 
 local function normalizeFrame(rawFrame)
@@ -382,21 +433,19 @@ local function applyFrame(i)
 			hrp.CFrame = rootCF
 			hrp.AssemblyLinearVelocity = targetVel
 		else
-			local correctionVel = posError * CONFIG.PHYSICS_SOFT_CORRECTION_GAIN
-			local correctionMag = correctionVel.Magnitude
-			if correctionMag > CONFIG.PHYSICS_MAX_CORRECTION_SPEED and correctionMag > 0 then
-				correctionVel = correctionVel.Unit * CONFIG.PHYSICS_MAX_CORRECTION_SPEED
+			hrp.AssemblyLinearVelocity = hrp.AssemblyLinearVelocity:Lerp(targetVel, CONFIG.PHYSICS_VELOCITY_BLEND)
+
+			if dist > CONFIG.PHYSICS_SOFT_PULL_DISTANCE and dist > 0 then
+				local correctionVel = posError * CONFIG.PHYSICS_SOFT_CORRECTION_GAIN
+				local correctionMag = correctionVel.Magnitude
+				if correctionMag > CONFIG.PHYSICS_MAX_CORRECTION_SPEED then
+					correctionVel = correctionVel.Unit * CONFIG.PHYSICS_MAX_CORRECTION_SPEED
+				end
+				hrp.AssemblyLinearVelocity = hrp.AssemblyLinearVelocity:Lerp(
+					hrp.AssemblyLinearVelocity + correctionVel,
+					CONFIG.PHYSICS_CORRECTION_BLEND
+				)
 			end
-
-			local desiredVel = targetVel + correctionVel
-			hrp.AssemblyLinearVelocity = hrp.AssemblyLinearVelocity:Lerp(desiredVel, CONFIG.PHYSICS_VELOCITY_BLEND)
-
-			-- Keep orientation close to recorded run without hard snapping position every frame.
-			local currentPos = hrp.Position
-			local targetRot = rootCF - rootCF.Position
-			local targetOrientCF = CFrame.new(currentPos) * targetRot
-			local blendedOrientCF = hrp.CFrame:Lerp(targetOrientCF, CONFIG.PHYSICS_ORIENTATION_BLEND)
-			hrp.CFrame = CFrame.new(currentPos) * (blendedOrientCF - blendedOrientCF.Position)
 		end
 	end
 	if shouldReplayDriveCamera() then
@@ -613,7 +662,9 @@ local function startRecord()
 	playbackAccumulator = 0
 	clearPlaybackLock()
 	clearRecordFreezeLock()
+	clearRecordNoCollision()
 	setCameraPlaybackMode(false)
+	applyRecordNoCollision()
 	shiftLockState = isShiftLockActive()
 
 	if recordMode == "replace" then
@@ -634,6 +685,7 @@ local function stopRecord()
 	end
 	setFrozen(false)
 	clearRecordFreezeLock()
+	clearRecordNoCollision()
 	mode = "idle"
 	log("Recording stopped. Frames: " .. tostring(#frames))
 end
@@ -649,6 +701,7 @@ local function startPlay()
 	playIndex = 1
 	lastTrimmedCount = 0
 	playbackAccumulator = 0
+	clearRecordNoCollision()
 	setCameraPlaybackMode(true)
 	applyPlaybackLock()
 	log("Playback started")
@@ -670,7 +723,7 @@ end
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.7.4",
+		version = "0.8",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
@@ -717,6 +770,7 @@ local function eraseReplay()
 	playbackAccumulator = 0
 	clearPlaybackLock()
 	clearRecordFreezeLock()
+	clearRecordNoCollision()
 	setCameraPlaybackMode(false)
 	saveReplay()
 	log("Replay erased")
@@ -729,6 +783,7 @@ local function commandHelp()
 	log("setspeed <number>")
 	log("playspeed <number>")
 	log("recorddt <fixed|realtime>")
+	log("recordnocollision <on|off>")
 	log("playbackmode <ghost|physics>")
 	log("recordmode <replace|append>")
 	log("status")
@@ -788,6 +843,22 @@ local function runCommand(raw)
 		end
 		fixedRecordDt = (modeArg == "fixed")
 		log("Record dt mode set to " .. modeArg)
+		return
+	end
+
+	if cmd == "recordnocollision" then
+		local modeArg = string.lower(args[2] or "")
+		if modeArg ~= "on" and modeArg ~= "off" then
+			log("Usage: recordnocollision <on|off>")
+			return
+		end
+		recordNoCollisionEnabled = (modeArg == "on")
+		if not recordNoCollisionEnabled then
+			clearRecordNoCollision()
+		elseif mode == "record" then
+			applyRecordNoCollision()
+		end
+		log("Record no-collision set to " .. modeArg)
 		return
 	end
 
@@ -980,6 +1051,7 @@ end)
 
 RunService.RenderStepped:Connect(function(dt)
 	if mode == "record" then
+		applyRecordNoCollision()
 		if frozen then
 			applyRecordFreezeLock()
 			if #frames > 0 then
@@ -1046,6 +1118,10 @@ RunService.RenderStepped:Connect(function(dt)
 end)
 
 player.CharacterAdded:Connect(function()
+	if mode == "record" then
+		task.wait(0.05)
+		applyRecordNoCollision()
+	end
 	if mode == "play" then
 		task.wait(0.2)
 		applyPlaybackLock()
@@ -1054,9 +1130,10 @@ end)
 
 shiftLockState = isShiftLockActive()
 
-log("Loaded v0.7.4. PlaceId: " .. tostring(game.PlaceId))
+log("Loaded v0.8. PlaceId: " .. tostring(game.PlaceId))
 log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics')")
 log("Record dt mode: " .. (fixedRecordDt and "fixed" or "realtime") .. " (use 'recorddt fixed|realtime')")
+log("Record no-collision: " .. (recordNoCollisionEnabled and "on" or "off") .. " (use 'recordnocollision on|off')")
 log("Playback hotkey moved to F10")
 log("Press F2 to force hide/show GUI")
 log("Type '/' to open command bar, then use 'help'")
