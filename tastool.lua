@@ -1,5 +1,5 @@
 --[[
-TAS Lite v0.7.5 (Roblox, LocalScript/executor)
+TAS Lite v0.7.4 (Roblox, LocalScript/executor)
 - Stable record/playback timing
 - Freeze/seek with safe frame indexing
 - Checkpoints + append recording mode
@@ -16,7 +16,7 @@ F7  - load replay from file
 E   - freeze/unfreeze (during record/playback)
 F   - previous frame (when frozen, record/playback)
 G   - next frame (when frozen, record/playback)
-R/T - hold to seek backward/forward (auto-freezes if needed)
+T/Y - hold to seek backward/forward (auto-freezes if needed)
 U   - toggle status UI
 F2  - force hide/show GUI
 C   - set quick checkpoint (record/playback)
@@ -28,8 +28,7 @@ local CONFIG = {
 	ROUND_DIGITS = 3,
 	DEFAULT_FRAME_DT = 1 / 60,
 	FIXED_RECORD_DT = true, -- Ignore render lag while recording for stable playback speed.
-	RECORD_NO_COLLISION = true, -- Disable character collisions while recording.
-	SEEK_SPEED = 1, -- frames per render step while holding R/T
+	SEEK_SPEED = 1, -- frames per render step while holding T/Y
 	PLAYBACK_SPEED = 1, -- realtime multiplier
 	PLAYBACK_MODE = "ghost", -- "ghost" | "physics"
 	PHYSICS_SNAP_DISTANCE = 12,
@@ -78,11 +77,6 @@ local playbackState = {
 	humanoid = nil,
 	hrp = nil,
 	saved = nil,
-}
-
-local recordNoCollisionState = {
-	active = false,
-	partCollide = {},
 }
 
 local function isShiftLockActive()
@@ -310,43 +304,6 @@ local function clearRecordFreezeLock()
 	recordFreezeState.anchored = nil
 end
 
-local function applyRecordNoCollision()
-	if not CONFIG.RECORD_NO_COLLISION then
-		return
-	end
-
-	local c = player.Character
-	if not c then
-		return
-	end
-
-	recordNoCollisionState.active = true
-
-	for _, inst in ipairs(c:GetDescendants()) do
-		if inst:IsA("BasePart") then
-			if recordNoCollisionState.partCollide[inst] == nil then
-				recordNoCollisionState.partCollide[inst] = inst.CanCollide
-			end
-			inst.CanCollide = false
-		end
-	end
-end
-
-local function clearRecordNoCollision()
-	if not recordNoCollisionState.active then
-		return
-	end
-
-	for part, oldValue in pairs(recordNoCollisionState.partCollide) do
-		if part and part.Parent then
-			part.CanCollide = oldValue == true
-		end
-	end
-
-	recordNoCollisionState.partCollide = {}
-	recordNoCollisionState.active = false
-end
-
 local function normalizeFrame(rawFrame)
 	if type(rawFrame) ~= "table" then
 		return nil
@@ -461,7 +418,7 @@ end
 local function statusText()
 	local recordFreezeText = (mode == "record" and frozen and "ON") or "OFF"
 	return string.format(
-		"Mode: %s | Frozen: %s | RecFreeze: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  R/T Seek  C/V Checkpoint  / Command  U UI  F2 Hide",
+		"Mode: %s | Frozen: %s | RecFreeze: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  T/Y Seek  C/V Checkpoint  / Command  U UI  F2 Hide",
 		mode,
 		tostring(frozen),
 		recordFreezeText,
@@ -656,9 +613,7 @@ local function startRecord()
 	playbackAccumulator = 0
 	clearPlaybackLock()
 	clearRecordFreezeLock()
-	clearRecordNoCollision()
 	setCameraPlaybackMode(false)
-	applyRecordNoCollision()
 	shiftLockState = isShiftLockActive()
 
 	if recordMode == "replace" then
@@ -679,7 +634,6 @@ local function stopRecord()
 	end
 	setFrozen(false)
 	clearRecordFreezeLock()
-	clearRecordNoCollision()
 	mode = "idle"
 	log("Recording stopped. Frames: " .. tostring(#frames))
 end
@@ -695,7 +649,6 @@ local function startPlay()
 	playIndex = 1
 	lastTrimmedCount = 0
 	playbackAccumulator = 0
-	clearRecordNoCollision()
 	setCameraPlaybackMode(true)
 	applyPlaybackLock()
 	log("Playback started")
@@ -717,7 +670,7 @@ end
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.7.5",
+		version = "0.7.4",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
@@ -764,7 +717,6 @@ local function eraseReplay()
 	playbackAccumulator = 0
 	clearPlaybackLock()
 	clearRecordFreezeLock()
-	clearRecordNoCollision()
 	setCameraPlaybackMode(false)
 	saveReplay()
 	log("Replay erased")
@@ -983,14 +935,14 @@ UIS.InputBegan:Connect(function(input, gp)
 			playIndex = clampIndex(playIndex + 1)
 			applyFrame(playIndex)
 		end
-	elseif kc == Enum.KeyCode.R then
+	elseif kc == Enum.KeyCode.T then
 		if mode == "play" or mode == "record" then
 			if not frozen then
 				setFrozen(true)
 			end
 			seekDir = -1
 		end
-	elseif kc == Enum.KeyCode.T then
+	elseif kc == Enum.KeyCode.Y then
 		if mode == "play" or mode == "record" then
 			if not frozen then
 				setFrozen(true)
@@ -1011,9 +963,9 @@ UIS.InputEnded:Connect(function(input)
 		heldKeys[input.KeyCode.Name] = nil
 	end
 
-	if input.KeyCode == Enum.KeyCode.R and seekDir == -1 then
+	if input.KeyCode == Enum.KeyCode.T and seekDir == -1 then
 		seekDir = 0
-	elseif input.KeyCode == Enum.KeyCode.T and seekDir == 1 then
+	elseif input.KeyCode == Enum.KeyCode.Y and seekDir == 1 then
 		seekDir = 0
 	end
 end)
@@ -1028,7 +980,6 @@ end)
 
 RunService.RenderStepped:Connect(function(dt)
 	if mode == "record" then
-		applyRecordNoCollision()
 		if frozen then
 			applyRecordFreezeLock()
 			if #frames > 0 then
@@ -1095,10 +1046,6 @@ RunService.RenderStepped:Connect(function(dt)
 end)
 
 player.CharacterAdded:Connect(function()
-	if mode == "record" then
-		task.wait(0.05)
-		applyRecordNoCollision()
-	end
 	if mode == "play" then
 		task.wait(0.2)
 		applyPlaybackLock()
@@ -1107,7 +1054,7 @@ end)
 
 shiftLockState = isShiftLockActive()
 
-log("Loaded v0.7.5. PlaceId: " .. tostring(game.PlaceId))
+log("Loaded v0.7.4. PlaceId: " .. tostring(game.PlaceId))
 log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics')")
 log("Record dt mode: " .. (fixedRecordDt and "fixed" or "realtime") .. " (use 'recorddt fixed|realtime')")
 log("Playback hotkey moved to F10")
