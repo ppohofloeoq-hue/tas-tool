@@ -75,15 +75,30 @@ local FRAMEBLEND_VELOCITY_BLEND = 0.45
 local FRAMEBLEND_ANGULAR_BLEND = 0.4
 local CAMERA_SMOOTH_RATE = CONFIG.CAMERA_SMOOTH_RATE
 
-local Players = game:GetService("Players")
-local UIS = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
-local HttpService = game:GetService("HttpService")
-local ContextActionService = game:GetService("ContextActionService")
-local TweenService = game:GetService("TweenService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-local Lighting = game:GetService("Lighting")
-local StarterGui = game:GetService("StarterGui")
+local function safeGetService(serviceName)
+	local ok, service = pcall(function()
+		return game:GetService(serviceName)
+	end)
+	if ok then
+		return service
+	end
+	return nil
+end
+
+local Players = safeGetService("Players")
+local UIS = safeGetService("UserInputService")
+local RunService = safeGetService("RunService")
+local HttpService = safeGetService("HttpService")
+local ContextActionService = safeGetService("ContextActionService")
+local TweenService = safeGetService("TweenService")
+local VirtualInputManager = safeGetService("VirtualInputManager")
+local Lighting = safeGetService("Lighting")
+local StarterGui = safeGetService("StarterGui")
+
+if not Players or not UIS or not RunService or not HttpService or not TweenService or not Lighting then
+	warn("[TAS Lite] Missing required Roblox services; aborting load")
+	return
+end
 
 local RUNTIME_KEY = "TASLiteRuntime"
 do
@@ -121,7 +136,23 @@ local function disconnectAllConnections()
 end
 
 local player = Players.LocalPlayer
+if not player then
+	warn("[TAS Lite] LocalPlayer is unavailable; aborting load")
+	return
+end
+
 local camera = workspace.CurrentCamera
+if not camera then
+	local cameraWaitStarted = tick()
+	repeat
+		RunService.RenderStepped:Wait()
+		camera = workspace.CurrentCamera
+	until camera or (tick() - cameraWaitStarted) > 5
+end
+if not camera then
+	warn("[TAS Lite] CurrentCamera is unavailable; aborting load")
+	return
+end
 local isTouchDevice = UIS.TouchEnabled and not UIS.MouseEnabled
 local startupCameraType = camera.CameraType
 local startupCameraCFrame = camera.CFrame
@@ -598,9 +629,11 @@ local function sendVirtualInputState(keyName, isDown, forceSend)
 
 	if keyName == "MouseButton1" then
 		local mousePos = UIS:GetMouseLocation()
-		pcall(function()
-			VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, 0, isDown, game, 0)
-		end)
+		if VirtualInputManager then
+			pcall(function()
+				VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, 0, isDown, game, 0)
+			end)
+		end
 		if isDown and mouse1press then
 			pcall(mouse1press)
 		elseif (not isDown) and mouse1release then
@@ -611,9 +644,11 @@ local function sendVirtualInputState(keyName, isDown, forceSend)
 
 	if keyName == "MouseButton2" then
 		local mousePos = UIS:GetMouseLocation()
-		pcall(function()
-			VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, 1, isDown, game, 0)
-		end)
+		if VirtualInputManager then
+			pcall(function()
+				VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, 1, isDown, game, 0)
+			end)
+		end
 		if isDown and mouse2press then
 			pcall(mouse2press)
 		elseif (not isDown) and mouse2release then
@@ -623,7 +658,7 @@ local function sendVirtualInputState(keyName, isDown, forceSend)
 	end
 
 	local keyEnum = Enum.KeyCode[keyName]
-	if keyEnum then
+	if keyEnum and VirtualInputManager then
 		pcall(function()
 			VirtualInputManager:SendKeyEvent(isDown, keyEnum, false, game)
 		end)
@@ -688,9 +723,18 @@ local function humanoidAndRoot()
 end
 
 local function ensureFolder()
-	if not isfolder(CONFIG.FOLDER) then
-		makefolder(CONFIG.FOLDER)
+	if type(isfolder) ~= "function" or type(makefolder) ~= "function" then
+		return false, "executor folder API is unavailable"
 	end
+	if not isfolder(CONFIG.FOLDER) then
+		local ok, err = pcall(function()
+			makefolder(CONFIG.FOLDER)
+		end)
+		if not ok then
+			return false, err
+		end
+	end
+	return true
 end
 
 local replayPath = CONFIG.FOLDER .. "/" .. tostring(game.PlaceId) .. "_" .. CONFIG.FILE_NAME
@@ -1924,10 +1968,39 @@ local function getUIParent()
 			return h
 		end
 	end
-	return game:GetService("CoreGui")
+	local coreGui = safeGetService("CoreGui")
+	if coreGui then
+		return coreGui
+	end
+	local okPlayerGui, playerGui = pcall(function()
+		return player:WaitForChild("PlayerGui", 5)
+	end)
+	if okPlayerGui and playerGui then
+		return playerGui
+	end
+	return nil
 end
 
-gui.Parent = getUIParent()
+local uiParent = getUIParent()
+if uiParent then
+	local okParent = pcall(function()
+		gui.Parent = uiParent
+	end)
+	if not okParent then
+		local okPlayerGui, playerGui = pcall(function()
+			return player:WaitForChild("PlayerGui", 5)
+		end)
+		if okPlayerGui and playerGui then
+			gui.Parent = playerGui
+		else
+			warn("[TAS Lite] Could not parent UI")
+			return
+		end
+	end
+else
+	warn("[TAS Lite] Could not find a UI parent")
+	return
+end
 playIntroAnimation()
 applySettingsVisibility()
 refreshSettingsUI()
@@ -5055,4 +5128,3 @@ log("Admin panel ready: " .. tostring(#adminCommandOrder) .. " commands (button:
 log("Press F2 to force hide/show GUI")
 log("Type '/' to open command bar, then use 'help'")
 updateUI()
-
