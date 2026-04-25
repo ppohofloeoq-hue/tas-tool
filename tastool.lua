@@ -1,5 +1,5 @@
 --[[
-TAS Lite v0.9.1 (Roblox, LocalScript/executor)
+TAS Lite v0.9.2 (Roblox, LocalScript/executor)
 - Stable record/playback timing
 - Fixed 60 FPS record/playback timeline
 - Virtual input playback (keyboard + mouse buttons)
@@ -103,6 +103,11 @@ local inputOverlayLabel
 local shiftLockIndicator
 local settingsToggleBtn
 local settingsOpen = false
+local inputKeyCaps = {}
+local mouseLeftCap
+local mouseRightCap
+local mouseDot
+local updatePlaybackInputOverlay
 
 local VIRTUAL_INPUT_BLACKLIST = {
 	F2 = true,
@@ -666,8 +671,21 @@ local function applyFrame(i)
 	return true
 end
 
-local function updatePlaybackInputOverlay(frame)
-	if not inputOverlayFrame or not inputOverlayLabel then
+local function setCapActive(capData, active)
+	if not capData then
+		return
+	end
+	if active then
+		capData.frame.BackgroundColor3 = Color3.fromRGB(245, 245, 245)
+		capData.label.TextColor3 = Color3.fromRGB(12, 12, 12)
+	else
+		capData.frame.BackgroundColor3 = Color3.fromRGB(8, 8, 8)
+		capData.label.TextColor3 = Color3.fromRGB(245, 245, 245)
+	end
+end
+
+updatePlaybackInputOverlay = function(frame)
+	if not inputOverlayFrame then
 		return
 	end
 
@@ -676,12 +694,33 @@ local function updatePlaybackInputOverlay(frame)
 		return
 	end
 
-	local keys = frame.keys or {}
-	local text = "Inputs: -"
-	if #keys > 0 then
-		text = "Inputs: " .. table.concat(keys, " | ")
+	local pressed = {}
+	for _, keyName in ipairs(frame.keys or {}) do
+		if type(keyName) == "string" then
+			pressed[keyName] = true
+		end
 	end
-	inputOverlayLabel.Text = text
+
+	setCapActive(inputKeyCaps.Up, pressed.Space or pressed.Up)
+	setCapActive(inputKeyCaps.W, pressed.W)
+	setCapActive(inputKeyCaps.A, pressed.A)
+	setCapActive(inputKeyCaps.S, pressed.S)
+	setCapActive(inputKeyCaps.D, pressed.D)
+	setCapActive(inputKeyCaps.Space, pressed.Space)
+
+	local lmb = pressed.MouseButton1
+	local rmb = pressed.MouseButton2
+	setCapActive(mouseLeftCap, lmb)
+	setCapActive(mouseRightCap, rmb)
+
+	if mouseDot then
+		if lmb or rmb then
+			mouseDot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+		else
+			mouseDot.BackgroundColor3 = Color3.fromRGB(255, 40, 40)
+		end
+	end
+
 	inputOverlayFrame.Visible = true
 end
 
@@ -789,7 +828,7 @@ titleLabel.TextColor3 = Color3.fromRGB(238, 245, 255)
 titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 titleLabel.Font = Enum.Font.GothamBold
 titleLabel.TextSize = 15
-titleLabel.Text = "TAS Tool  v0.9.0"
+titleLabel.Text = "TAS Tool  v0.9.2"
 titleLabel.Parent = topBar
 
 shiftLockIndicator = Instance.new("TextLabel")
@@ -920,34 +959,143 @@ logCorner.CornerRadius = UDim.new(0, 6)
 logCorner.Parent = logLabel
 
 inputOverlayFrame = Instance.new("Frame")
-inputOverlayFrame.Size = UDim2.fromOffset(270, 34)
-inputOverlayFrame.Position = UDim2.new(1, -280, 0, 44)
-inputOverlayFrame.BackgroundColor3 = Color3.fromRGB(13, 19, 30)
-inputOverlayFrame.BackgroundTransparency = 0.08
+inputOverlayFrame.Size = UDim2.fromOffset(430, 190)
+inputOverlayFrame.Position = UDim2.new(1, -442, 0, 44)
+inputOverlayFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+inputOverlayFrame.BackgroundTransparency = 0.2
 inputOverlayFrame.BorderSizePixel = 0
 inputOverlayFrame.Visible = false
 inputOverlayFrame.Parent = mainFrame
 
 local inputOverlayCorner = Instance.new("UICorner")
-inputOverlayCorner.CornerRadius = UDim.new(0, 6)
+inputOverlayCorner.CornerRadius = UDim.new(0, 10)
 inputOverlayCorner.Parent = inputOverlayFrame
 
 local inputOverlayStroke = Instance.new("UIStroke")
-inputOverlayStroke.Color = Color3.fromRGB(78, 137, 222)
-inputOverlayStroke.Transparency = 0.15
-inputOverlayStroke.Thickness = 1
+inputOverlayStroke.Color = Color3.fromRGB(220, 220, 220)
+inputOverlayStroke.Transparency = 0.8
+inputOverlayStroke.Thickness = 1.2
 inputOverlayStroke.Parent = inputOverlayFrame
 
+local keyboardHolder = Instance.new("Frame")
+keyboardHolder.Size = UDim2.fromOffset(205, 174)
+keyboardHolder.Position = UDim2.fromOffset(8, 8)
+keyboardHolder.BackgroundTransparency = 1
+keyboardHolder.Parent = inputOverlayFrame
+
+local function createInputCap(name, text, size, pos)
+	local cap = Instance.new("Frame")
+	cap.Name = "Cap_" .. name
+	cap.Size = size
+	cap.Position = pos
+	cap.BackgroundColor3 = Color3.fromRGB(8, 8, 8)
+	cap.BackgroundTransparency = 0.02
+	cap.BorderSizePixel = 0
+	cap.Parent = keyboardHolder
+
+	local capCorner = Instance.new("UICorner")
+	capCorner.CornerRadius = UDim.new(0, 10)
+	capCorner.Parent = cap
+
+	local capText = Instance.new("TextLabel")
+	capText.Size = UDim2.fromScale(1, 1)
+	capText.BackgroundTransparency = 1
+	capText.Text = text
+	capText.TextColor3 = Color3.fromRGB(245, 245, 245)
+	capText.Font = Enum.Font.GothamBold
+	capText.TextSize = 24
+	capText.Parent = cap
+
+	inputKeyCaps[name] = {
+		frame = cap,
+		label = capText,
+	}
+end
+
+createInputCap("Up", "^", UDim2.fromOffset(54, 50), UDim2.fromOffset(16, 4))
+createInputCap("W", "W", UDim2.fromOffset(54, 50), UDim2.fromOffset(78, 4))
+createInputCap("A", "A", UDim2.fromOffset(54, 50), UDim2.fromOffset(16, 58))
+createInputCap("S", "S", UDim2.fromOffset(54, 50), UDim2.fromOffset(78, 58))
+createInputCap("D", "D", UDim2.fromOffset(54, 50), UDim2.fromOffset(140, 58))
+createInputCap("Space", "_____ ", UDim2.fromOffset(160, 50), UDim2.fromOffset(16, 114))
+
+local mouseHolder = Instance.new("Frame")
+mouseHolder.Size = UDim2.fromOffset(190, 174)
+mouseHolder.Position = UDim2.fromOffset(228, 8)
+mouseHolder.BackgroundTransparency = 1
+mouseHolder.Parent = inputOverlayFrame
+
+local mouseCircle = Instance.new("Frame")
+mouseCircle.Size = UDim2.fromOffset(172, 172)
+mouseCircle.Position = UDim2.fromOffset(8, 1)
+mouseCircle.BackgroundColor3 = Color3.fromRGB(8, 8, 8)
+mouseCircle.BorderSizePixel = 0
+mouseCircle.Parent = mouseHolder
+
+local mouseCircleCorner = Instance.new("UICorner")
+mouseCircleCorner.CornerRadius = UDim.new(1, 0)
+mouseCircleCorner.Parent = mouseCircle
+
+local mouseCircleStroke = Instance.new("UIStroke")
+mouseCircleStroke.Color = Color3.fromRGB(240, 240, 240)
+mouseCircleStroke.Transparency = 0.85
+mouseCircleStroke.Thickness = 1.2
+mouseCircleStroke.Parent = mouseCircle
+
+local function createMouseButtonCap(name, text, size, pos)
+	local cap = Instance.new("Frame")
+	cap.Name = "MouseCap_" .. name
+	cap.Size = size
+	cap.Position = pos
+	cap.BackgroundColor3 = Color3.fromRGB(8, 8, 8)
+	cap.BackgroundTransparency = 0.02
+	cap.BorderSizePixel = 0
+	cap.Parent = mouseHolder
+
+	local capCorner = Instance.new("UICorner")
+	capCorner.CornerRadius = UDim.new(0, 8)
+	capCorner.Parent = cap
+
+	local capLabel = Instance.new("TextLabel")
+	capLabel.Size = UDim2.fromScale(1, 1)
+	capLabel.BackgroundTransparency = 1
+	capLabel.Text = text
+	capLabel.TextColor3 = Color3.fromRGB(245, 245, 245)
+	capLabel.Font = Enum.Font.GothamBold
+	capLabel.TextSize = 12
+	capLabel.Parent = cap
+
+	return {
+		frame = cap,
+		label = capLabel,
+	}
+end
+
+mouseLeftCap = createMouseButtonCap("Left", "LMB", UDim2.fromOffset(58, 24), UDim2.fromOffset(12, 146))
+mouseRightCap = createMouseButtonCap("Right", "RMB", UDim2.fromOffset(58, 24), UDim2.fromOffset(120, 146))
+
+mouseDot = Instance.new("Frame")
+mouseDot.Size = UDim2.fromOffset(18, 18)
+mouseDot.AnchorPoint = Vector2.new(0.5, 0.5)
+mouseDot.Position = UDim2.fromOffset(94, 87)
+mouseDot.BackgroundColor3 = Color3.fromRGB(255, 40, 40)
+mouseDot.BorderSizePixel = 0
+mouseDot.Parent = mouseHolder
+
+local mouseDotCorner = Instance.new("UICorner")
+mouseDotCorner.CornerRadius = UDim.new(1, 0)
+mouseDotCorner.Parent = mouseDot
+
 inputOverlayLabel = Instance.new("TextLabel")
-inputOverlayLabel.Size = UDim2.new(1, -12, 1, 0)
-inputOverlayLabel.Position = UDim2.fromOffset(8, 0)
+inputOverlayLabel.Size = UDim2.new(1, -12, 0, 18)
+inputOverlayLabel.Position = UDim2.fromOffset(8, 4)
 inputOverlayLabel.BackgroundTransparency = 1
 inputOverlayLabel.TextXAlignment = Enum.TextXAlignment.Left
-inputOverlayLabel.TextYAlignment = Enum.TextYAlignment.Center
-inputOverlayLabel.Font = Enum.Font.Code
-inputOverlayLabel.TextSize = 12
-inputOverlayLabel.TextColor3 = Color3.fromRGB(205, 229, 255)
-inputOverlayLabel.Text = "Inputs: -"
+inputOverlayLabel.TextYAlignment = Enum.TextYAlignment.Top
+inputOverlayLabel.Font = Enum.Font.GothamSemibold
+inputOverlayLabel.TextSize = 11
+inputOverlayLabel.TextColor3 = Color3.fromRGB(208, 220, 242)
+inputOverlayLabel.Text = "Playback Input Overlay"
 inputOverlayLabel.Parent = inputOverlayFrame
 
 local loadingOverlay = Instance.new("Frame")
@@ -1388,7 +1536,7 @@ end
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.9.0",
+		version = "0.9.2",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
@@ -1871,7 +2019,7 @@ end)
 
 shiftLockState = isShiftLockActive()
 
-log("Loaded v0.9.1. PlaceId: " .. tostring(game.PlaceId))
+log("Loaded v0.9.2. PlaceId: " .. tostring(game.PlaceId))
 log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics|smooth')")
 log("Timeline FPS locked: " .. tostring(CONFIG.TIMELINE_FPS))
 log("Virtual input playback: " .. (virtualInputPlaybackEnabled and "on" or "off") .. " (use 'inputs on|off')")
