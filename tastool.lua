@@ -88,6 +88,16 @@ local timelineStep = 1 / CONFIG.TIMELINE_FPS
 local virtualInputPlaybackEnabled = CONFIG.VIRTUAL_INPUT_PLAYBACK
 local recordNoCollisionEnabled = CONFIG.RECORD_NO_COLLISION
 local virtualPressed = {}
+local lastRecordedShiftLockState = nil
+local settingsFrame
+local settingsInputsBtn
+local settingsPlaybackModeBtn
+local settingsRecordNoColBtn
+local settingsRecordModeBtn
+local settingsPlaySpeedBtn
+local inputOverlayFrame
+local inputOverlayLabel
+local shiftLockIndicator
 
 local VIRTUAL_INPUT_BLACKLIST = {
 	F2 = true,
@@ -647,16 +657,58 @@ local function applyFrame(i)
 	elseif mode == "play" and frozen then
 		releaseAllVirtualInputs()
 	end
+	updatePlaybackInputOverlay(frame)
 	return true
+end
+
+local function updatePlaybackInputOverlay(frame)
+	if not inputOverlayFrame or not inputOverlayLabel then
+		return
+	end
+
+	if mode ~= "play" or type(frame) ~= "table" then
+		inputOverlayFrame.Visible = false
+		return
+	end
+
+	local keys = frame.keys or {}
+	local text = "Inputs: -"
+	if #keys > 0 then
+		text = "Inputs: " .. table.concat(keys, " | ")
+	end
+	inputOverlayLabel.Text = text
+	inputOverlayFrame.Visible = true
+end
+
+local function refreshSettingsUI()
+	if settingsInputsBtn then
+		settingsInputsBtn.Text = "Inputs: " .. (virtualInputPlaybackEnabled and "ON" or "OFF")
+		settingsInputsBtn.BackgroundColor3 = virtualInputPlaybackEnabled and Color3.fromRGB(26, 76, 50) or Color3.fromRGB(70, 33, 33)
+	end
+	if settingsPlaybackModeBtn then
+		settingsPlaybackModeBtn.Text = "Playback: " .. tostring(playbackMode)
+	end
+	if settingsRecordNoColBtn then
+		settingsRecordNoColBtn.Text = "RecNoCol: " .. (recordNoCollisionEnabled and "ON" or "OFF")
+		settingsRecordNoColBtn.BackgroundColor3 = recordNoCollisionEnabled and Color3.fromRGB(74, 56, 18) or Color3.fromRGB(29, 56, 84)
+	end
+	if settingsRecordModeBtn then
+		settingsRecordModeBtn.Text = "RecMode: " .. tostring(recordMode)
+	end
+	if settingsPlaySpeedBtn then
+		settingsPlaySpeedBtn.Text = string.format("PlaySpeed: %.2f", playbackSpeed)
+	end
 end
 
 local function statusText()
 	local recordFreezeText = (mode == "record" and frozen and "ON") or "OFF"
+	local shiftStateText = isShiftLockActive() and "ON" or "OFF"
 	return string.format(
-		"Mode: %s | Frozen: %s | RecFreeze: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | TimelineFPS: %d | Inputs: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  T/Y Seek  C/V Checkpoint  / Command  U UI  F2 Hide",
+		"Mode: %s | Frozen: %s | RecFreeze: %s | ShiftLock: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | TimelineFPS: %d | Inputs: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  T/Y Seek  C/V Checkpoint  / Command  U UI  F2 Hide",
 		mode,
 		tostring(frozen),
 		recordFreezeText,
+		shiftStateText,
 		playIndex,
 		#frames,
 		lastTrimmedCount,
@@ -677,7 +729,7 @@ gui.IgnoreGuiInset = false
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
 mainFrame = Instance.new("Frame")
-mainFrame.Size = UDim2.fromOffset(780, 350)
+mainFrame.Size = UDim2.fromOffset(780, 410)
 mainFrame.Position = UDim2.fromOffset(16, 12)
 mainFrame.BackgroundColor3 = Color3.fromRGB(18, 22, 30)
 mainFrame.BorderSizePixel = 0
@@ -719,6 +771,22 @@ titleLabel.TextSize = 15
 titleLabel.Text = "TAS Tool  v0.9.0"
 titleLabel.Parent = topBar
 
+shiftLockIndicator = Instance.new("TextLabel")
+shiftLockIndicator.Size = UDim2.fromOffset(140, 22)
+shiftLockIndicator.Position = UDim2.new(1, -150, 0, 7)
+shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(76, 40, 40)
+shiftLockIndicator.BackgroundTransparency = 0.15
+shiftLockIndicator.BorderSizePixel = 0
+shiftLockIndicator.TextColor3 = Color3.fromRGB(255, 226, 226)
+shiftLockIndicator.Font = Enum.Font.GothamSemibold
+shiftLockIndicator.TextSize = 12
+shiftLockIndicator.Text = "ShiftLock REC: OFF"
+shiftLockIndicator.Parent = topBar
+
+local shiftCorner = Instance.new("UICorner")
+shiftCorner.CornerRadius = UDim.new(0, 6)
+shiftCorner.Parent = shiftLockIndicator
+
 local label = Instance.new("TextLabel")
 label.Size = UDim2.new(1, -20, 0, 96)
 label.Position = UDim2.fromOffset(10, 44)
@@ -756,9 +824,47 @@ local commandCorner = Instance.new("UICorner")
 commandCorner.CornerRadius = UDim.new(0, 6)
 commandCorner.Parent = commandBar
 
+settingsFrame = Instance.new("Frame")
+settingsFrame.Size = UDim2.new(1, -20, 0, 32)
+settingsFrame.Position = UDim2.fromOffset(10, 186)
+settingsFrame.BackgroundTransparency = 1
+settingsFrame.Parent = mainFrame
+
+local settingsLayout = Instance.new("UIListLayout")
+settingsLayout.FillDirection = Enum.FillDirection.Horizontal
+settingsLayout.Padding = UDim.new(0, 8)
+settingsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+settingsLayout.Parent = settingsFrame
+
+local function makeSettingButton()
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.fromOffset(145, 32)
+	btn.BackgroundColor3 = Color3.fromRGB(27, 38, 56)
+	btn.BorderSizePixel = 0
+	btn.TextColor3 = Color3.fromRGB(230, 238, 255)
+	btn.Font = Enum.Font.GothamSemibold
+	btn.TextSize = 12
+	btn.AutoButtonColor = true
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = btn
+	return btn
+end
+
+settingsInputsBtn = makeSettingButton()
+settingsInputsBtn.Parent = settingsFrame
+settingsPlaybackModeBtn = makeSettingButton()
+settingsPlaybackModeBtn.Parent = settingsFrame
+settingsRecordNoColBtn = makeSettingButton()
+settingsRecordNoColBtn.Parent = settingsFrame
+settingsRecordModeBtn = makeSettingButton()
+settingsRecordModeBtn.Parent = settingsFrame
+settingsPlaySpeedBtn = makeSettingButton()
+settingsPlaySpeedBtn.Parent = settingsFrame
+
 logLabel = Instance.new("TextLabel")
-logLabel.Size = UDim2.new(1, -20, 1, -188)
-logLabel.Position = UDim2.fromOffset(10, 186)
+logLabel.Size = UDim2.new(1, -20, 1, -228)
+logLabel.Position = UDim2.fromOffset(10, 224)
 logLabel.BackgroundColor3 = Color3.fromRGB(9, 12, 18)
 logLabel.BackgroundTransparency = 0.05
 logLabel.TextColor3 = Color3.fromRGB(177, 255, 205)
@@ -774,6 +880,37 @@ logLabel.Parent = mainFrame
 local logCorner = Instance.new("UICorner")
 logCorner.CornerRadius = UDim.new(0, 6)
 logCorner.Parent = logLabel
+
+inputOverlayFrame = Instance.new("Frame")
+inputOverlayFrame.Size = UDim2.fromOffset(270, 34)
+inputOverlayFrame.Position = UDim2.new(1, -280, 0, 44)
+inputOverlayFrame.BackgroundColor3 = Color3.fromRGB(13, 19, 30)
+inputOverlayFrame.BackgroundTransparency = 0.08
+inputOverlayFrame.BorderSizePixel = 0
+inputOverlayFrame.Visible = false
+inputOverlayFrame.Parent = mainFrame
+
+local inputOverlayCorner = Instance.new("UICorner")
+inputOverlayCorner.CornerRadius = UDim.new(0, 6)
+inputOverlayCorner.Parent = inputOverlayFrame
+
+local inputOverlayStroke = Instance.new("UIStroke")
+inputOverlayStroke.Color = Color3.fromRGB(78, 137, 222)
+inputOverlayStroke.Transparency = 0.15
+inputOverlayStroke.Thickness = 1
+inputOverlayStroke.Parent = inputOverlayFrame
+
+inputOverlayLabel = Instance.new("TextLabel")
+inputOverlayLabel.Size = UDim2.new(1, -12, 1, 0)
+inputOverlayLabel.Position = UDim2.fromOffset(8, 0)
+inputOverlayLabel.BackgroundTransparency = 1
+inputOverlayLabel.TextXAlignment = Enum.TextXAlignment.Left
+inputOverlayLabel.TextYAlignment = Enum.TextYAlignment.Center
+inputOverlayLabel.Font = Enum.Font.Code
+inputOverlayLabel.TextSize = 12
+inputOverlayLabel.TextColor3 = Color3.fromRGB(205, 229, 255)
+inputOverlayLabel.Text = "Inputs: -"
+inputOverlayLabel.Parent = inputOverlayFrame
 
 local loadingOverlay = Instance.new("Frame")
 loadingOverlay.Size = UDim2.fromScale(1, 1)
@@ -825,6 +962,18 @@ loadHint.TextXAlignment = Enum.TextXAlignment.Left
 loadHint.ZIndex = 101
 loadHint.Parent = loadingPanel
 
+local loadPercent = Instance.new("TextLabel")
+loadPercent.Size = UDim2.fromOffset(56, 22)
+loadPercent.Position = UDim2.new(1, -68, 0, 52)
+loadPercent.BackgroundTransparency = 1
+loadPercent.Text = "0%"
+loadPercent.TextColor3 = Color3.fromRGB(201, 219, 248)
+loadPercent.Font = Enum.Font.GothamSemibold
+loadPercent.TextSize = 14
+loadPercent.TextXAlignment = Enum.TextXAlignment.Right
+loadPercent.ZIndex = 101
+loadPercent.Parent = loadingPanel
+
 local loadTrack = Instance.new("Frame")
 loadTrack.Size = UDim2.new(1, -24, 0, 14)
 loadTrack.Position = UDim2.fromOffset(12, 94)
@@ -851,6 +1000,7 @@ loadFillCorner.Parent = loadFill
 local function playIntroAnimation()
 	mainFrame.Position = UDim2.fromOffset(16, -360)
 	mainFrame.BackgroundTransparency = 0.35
+	mainFrame.Rotation = -2
 	local hints = {
 		"Preparing timeline...",
 		"Configuring playback core...",
@@ -858,25 +1008,27 @@ local function playIntroAnimation()
 		"Almost ready...",
 	}
 
-	task.spawn(function()
-		for idx, text in ipairs(hints) do
-			loadHint.Text = text
-			task.wait(0.24 + (idx * 0.02))
-		end
-	end)
-
 	local fillTween = TweenService:Create(
 		loadFill,
 		TweenInfo.new(1.05, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 		{ Size = UDim2.fromScale(1, 1) }
 	)
 	fillTween:Play()
-	fillTween.Completed:Wait()
+
+	local startTick = tick()
+	while fillTween.PlaybackState == Enum.PlaybackState.Playing do
+		local progress = math.clamp((tick() - startTick) / 1.05, 0, 1)
+		local idx = math.clamp(math.floor(progress * #hints) + 1, 1, #hints)
+		loadHint.Text = hints[idx]
+		loadPercent.Text = tostring(math.floor(progress * 100)) .. "%"
+		task.wait(0.03)
+	end
+	loadPercent.Text = "100%"
 
 	local panelTween = TweenService:Create(
 		mainFrame,
 		TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-		{ Position = UDim2.fromOffset(16, 12), BackgroundTransparency = 0 }
+		{ Position = UDim2.fromOffset(16, 12), BackgroundTransparency = 0, Rotation = 0 }
 	)
 	panelTween:Play()
 
@@ -889,6 +1041,68 @@ local function playIntroAnimation()
 	overlayFade.Completed:Wait()
 	loadingOverlay:Destroy()
 end
+
+local function cyclePlaybackMode()
+	local nextMode = playbackMode
+	if playbackMode == "ghost" then
+		nextMode = "physics"
+	elseif playbackMode == "physics" then
+		nextMode = "smooth"
+	else
+		nextMode = "ghost"
+	end
+	playbackMode = nextMode
+	if mode == "play" then
+		setCameraPlaybackMode(true)
+		applyPlaybackLock()
+	end
+	log("Playback mode set to " .. playbackMode)
+	refreshSettingsUI()
+end
+
+local function cycleRecordMode()
+	if recordMode == "replace" then
+		recordMode = "append"
+	else
+		recordMode = "replace"
+	end
+	log("Record mode set to " .. recordMode)
+	refreshSettingsUI()
+end
+
+settingsInputsBtn.MouseButton1Click:Connect(function()
+	virtualInputPlaybackEnabled = not virtualInputPlaybackEnabled
+	if not virtualInputPlaybackEnabled then
+		releaseAllVirtualInputs()
+	end
+	log("Virtual input playback set to " .. (virtualInputPlaybackEnabled and "on" or "off"))
+	refreshSettingsUI()
+end)
+
+settingsPlaybackModeBtn.MouseButton1Click:Connect(cyclePlaybackMode)
+
+settingsRecordNoColBtn.MouseButton1Click:Connect(function()
+	recordNoCollisionEnabled = not recordNoCollisionEnabled
+	if not recordNoCollisionEnabled then
+		clearRecordNoCollision()
+	elseif mode == "record" then
+		applyRecordNoCollision()
+	end
+	log("Record no-collision set to " .. (recordNoCollisionEnabled and "on" or "off"))
+	refreshSettingsUI()
+end)
+
+settingsRecordModeBtn.MouseButton1Click:Connect(cycleRecordMode)
+
+settingsPlaySpeedBtn.MouseButton1Click:Connect(function()
+	local nextSpeed = playbackSpeed + 0.25
+	if nextSpeed > 2 then
+		nextSpeed = 0.5
+	end
+	playbackSpeed = nextSpeed
+	log("Playback speed set to " .. string.format("%.2f", playbackSpeed))
+	refreshSettingsUI()
+end)
 
 local function getUIParent()
 	if gethui then
@@ -905,6 +1119,21 @@ playIntroAnimation()
 
 local function updateUI()
 	label.Text = statusText()
+	if shiftLockIndicator then
+		local shiftOn = isShiftLockActive()
+		shiftLockIndicator.Text = "ShiftLock REC: " .. (shiftOn and "ON" or "OFF")
+		if shiftOn then
+			shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(32, 95, 63)
+			shiftLockIndicator.TextColor3 = Color3.fromRGB(210, 255, 231)
+		else
+			shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(76, 40, 40)
+			shiftLockIndicator.TextColor3 = Color3.fromRGB(255, 226, 226)
+		end
+	end
+	if inputOverlayFrame then
+		inputOverlayFrame.Visible = (mode == "play")
+	end
+	refreshSettingsUI()
 	gui.Enabled = (uiVisible and not forceHideUI)
 end
 
@@ -949,6 +1178,13 @@ local function captureFrame(captureDt)
 		return
 	end
 
+	local shiftNow = isShiftLockActive()
+	local nextFrameIndex = #frames + 1
+	if lastRecordedShiftLockState ~= nil and shiftNow ~= lastRecordedShiftLockState then
+		log("ShiftLock " .. (shiftNow and "ON" or "OFF") .. " @ frame " .. tostring(nextFrameIndex))
+	end
+	lastRecordedShiftLockState = shiftNow
+
 	local frame = {
 		dt = round(math.max(1 / 1000, captureDt or timelineStep), 5),
 		root = roundArray(cfToTable(hrp.CFrame), CONFIG.ROUND_DIGITS),
@@ -959,7 +1195,7 @@ local function captureFrame(captureDt)
 		cam_local = roundArray(cfToTable(hrp.CFrame:ToObjectSpace(camera.CFrame)), CONFIG.ROUND_DIGITS),
 		fov = round(camera.FieldOfView, CONFIG.ROUND_DIGITS),
 		hstate = hum:GetState().Name,
-		shiftlock = isShiftLockActive(),
+		shiftlock = shiftNow,
 		keys = keysSnapshot(),
 	}
 	table.insert(frames, frame)
@@ -1024,12 +1260,14 @@ local function startRecord()
 	playbackAccumulator = 0
 	recordAccumulator = 0
 	releaseAllVirtualInputs()
+	updatePlaybackInputOverlay(nil)
 	clearPlaybackLock()
 	clearRecordFreezeLock()
 	clearRecordNoCollision()
 	setCameraPlaybackMode(false)
 	applyRecordNoCollision()
 	shiftLockState = isShiftLockActive()
+	lastRecordedShiftLockState = shiftLockState
 
 	if recordMode == "replace" then
 		frames = {}
@@ -1051,6 +1289,8 @@ local function stopRecord()
 	clearRecordFreezeLock()
 	clearRecordNoCollision()
 	recordAccumulator = 0
+	lastRecordedShiftLockState = nil
+	updatePlaybackInputOverlay(nil)
 	mode = "idle"
 	log("Recording stopped. Frames: " .. tostring(#frames))
 end
@@ -1068,6 +1308,7 @@ local function startPlay()
 	playbackAccumulator = 0
 	recordAccumulator = 0
 	releaseAllVirtualInputs()
+	updatePlaybackInputOverlay(nil)
 	clearRecordNoCollision()
 	setCameraPlaybackMode(true)
 	applyPlaybackLock()
@@ -1086,6 +1327,7 @@ local function stopPlay()
 	playbackAccumulator = 0
 	recordAccumulator = 0
 	releaseAllVirtualInputs()
+	updatePlaybackInputOverlay(nil)
 	clearPlaybackLock()
 	setCameraPlaybackMode(false)
 	log("Playback stopped")
@@ -1203,6 +1445,7 @@ local function runCommand(raw)
 		end
 		playbackSpeed = newSpeed
 		log("Playback speed set to " .. tostring(playbackSpeed))
+		refreshSettingsUI()
 		return
 	end
 
@@ -1217,6 +1460,7 @@ local function runCommand(raw)
 			releaseAllVirtualInputs()
 		end
 		log("Virtual input playback set to " .. modeArg)
+		refreshSettingsUI()
 		return
 	end
 
@@ -1233,6 +1477,7 @@ local function runCommand(raw)
 			applyRecordNoCollision()
 		end
 		log("Record no-collision set to " .. modeArg)
+		refreshSettingsUI()
 		return
 	end
 
@@ -1248,6 +1493,7 @@ local function runCommand(raw)
 			applyPlaybackLock()
 		end
 		log("Playback mode set to " .. playbackMode)
+		refreshSettingsUI()
 		return
 	end
 
@@ -1259,6 +1505,7 @@ local function runCommand(raw)
 		end
 		recordMode = newMode
 		log("Record mode set to " .. recordMode)
+		refreshSettingsUI()
 		return
 	end
 
