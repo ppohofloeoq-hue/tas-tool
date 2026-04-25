@@ -42,6 +42,7 @@ local CONFIG = {
 	PLAYBACK_MODE = "physics", -- "ghost" | "physics" | "smooth"
 	CAMERA_MODE = "smooth", -- "exact" | "smooth" for playback camera turns
 	PHYSICS_CAMERA_SMOOTH_RATE = 22, -- higher = snappier, lower = smoother
+	PHYSICS_HARD_SNAP_DISTANCE = 36,
 	PHYSICS_SNAP_DISTANCE = 10,
 	PHYSICS_SOFT_PULL_DISTANCE = 1.25,
 	PHYSICS_SOFT_CORRECTION_GAIN = 7.0,
@@ -67,6 +68,41 @@ local HttpService = game:GetService("HttpService")
 local ContextActionService = game:GetService("ContextActionService")
 local TweenService = game:GetService("TweenService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local RUNTIME_KEY = "TASLiteRuntime"
+do
+	local prev = rawget(_G, RUNTIME_KEY)
+	if type(prev) == "table" and type(prev.cleanup) == "function" then
+		pcall(prev.cleanup)
+	end
+end
+
+local runtime = {
+	connections = {},
+	destroyed = false,
+}
+_G[RUNTIME_KEY] = runtime
+
+local function bindConnection(conn)
+	table.insert(runtime.connections, conn)
+	return conn
+end
+
+local function connect(signal, fn)
+	return bindConnection(signal:Connect(fn))
+end
+
+local function disconnectAllConnections()
+	for i = #runtime.connections, 1, -1 do
+		local conn = runtime.connections[i]
+		runtime.connections[i] = nil
+		if conn then
+			pcall(function()
+				conn:Disconnect()
+			end)
+		end
+	end
+end
 
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
@@ -120,8 +156,10 @@ local mouseLeftCap
 local mouseRightCap
 local mouseDot
 local updatePlaybackInputOverlay
+local updateUI
 local inputOverlayEnabled = true
 local lastOverlayCamLocalCF = nil
+local lastShiftIndicatorState = nil
 local overlayMouseState = {
 	x = 0,
 	y = 0,
@@ -196,7 +234,9 @@ local function handleShiftLockKey()
 	-- Let Roblox process native ShiftLock first, then just mirror real state.
 	task.delay(0.03, function()
 		shiftLockState = isShiftLockActive()
-		updateUI()
+		if updateUI then
+			updateUI()
+		end
 	end)
 end
 
@@ -241,6 +281,84 @@ local function round(n, digits)
 	return math.floor(n * m + 0.5) / m
 end
 
+local function isFiniteNumber(n)
+	return type(n) == "number" and n == n and n ~= math.huge and n ~= -math.huge
+end
+
+local function toFiniteNumber(value, fallback)
+	local n = tonumber(value)
+	if isFiniteNumber(n) then
+		return n
+	end
+	return fallback
+end
+
+local function sanitizeCFrameTable(raw)
+	if type(raw) ~= "table" or #raw < 12 then
+		return nil
+	end
+	local out = table.create(12)
+	for i = 1, 12 do
+		local n = toFiniteNumber(raw[i], nil)
+		if not n then
+			return nil
+		end
+		out[i] = n
+	end
+	return out
+end
+
+local function sanitizeV3Table(raw, fallback)
+	if type(raw) ~= "table" or #raw < 3 then
+		return fallback or { 0, 0, 0 }
+	end
+	local x = toFiniteNumber(raw[1], nil)
+	local y = toFiniteNumber(raw[2], nil)
+	local z = toFiniteNumber(raw[3], nil)
+	if not x or not y or not z then
+		return fallback or { 0, 0, 0 }
+	end
+	return { x, y, z }
+end
+
+local function sanitizeFrameKeys(rawKeys)
+	if type(rawKeys) ~= "table" then
+		return {}
+	end
+	local out = {}
+	local seen = {}
+	local maxKeys = 64
+	for _, keyName in ipairs(rawKeys) do
+		if #out >= maxKeys then
+			break
+		end
+		if type(keyName) == "string" and #keyName > 0 and #keyName <= 32 and not seen[keyName] then
+			seen[keyName] = true
+			table.insert(out, keyName)
+		end
+	end
+	return out
+end
+
+local function sanitizeCheckpoints(rawCheckpoints, frameCount)
+	if type(rawCheckpoints) ~= "table" or frameCount <= 0 then
+		return {}, 0
+	end
+	local out = {}
+	local dropped = 0
+	for name, idx in pairs(rawCheckpoints) do
+		local okName = (type(name) == "string" and #name > 0 and #name <= 64)
+		local n = tonumber(idx)
+		if okName and isFiniteNumber(n) then
+			local clamped = math.clamp(math.floor(n + 0.5), 1, frameCount)
+			out[name] = clamped
+		else
+			dropped = dropped + 1
+		end
+	end
+	return out, dropped
+end
+
 local function roundArray(arr, digits)
 	local out = table.create(#arr)
 	for i, v in ipairs(arr) do
@@ -254,10 +372,11 @@ local function cfToTable(cf)
 end
 
 local function tableToCf(t)
-	if type(t) ~= "table" or #t < 12 then
+	local clean = sanitizeCFrameTable(t)
+	if not clean then
 		return nil
 	end
-	return CFrame.new(unpack(t))
+	return CFrame.new(unpack(clean))
 end
 
 local function v3ToTable(v)
@@ -265,10 +384,48 @@ local function v3ToTable(v)
 end
 
 local function tableToV3(t)
-	if type(t) ~= "table" or #t < 3 then
-		return Vector3.new()
+	local clean = sanitizeV3Table(t, { 0, 0, 0 })
+	return Vector3.new(clean[1], clean[2], clean[3])
+end
+
+local function pressedMapFromFrame(frame)
+	local pressed = {}
+	if type(frame) == "table" and type(frame.keys) == "table" then
+		for _, keyName in ipairs(frame.keys) do
+			if type(keyName) == "string" then
+				pressed[keyName] = true
+			end
+		end
 	end
-	return Vector3.new(t[1], t[2], t[3])
+	return pressed
+end
+
+local function movementFromPressedMap(pressed, rootCF)
+	local x = 0
+	local z = 0
+	if pressed.W or pressed.Up then
+		z = z - 1
+	end
+	if pressed.S or pressed.Down then
+		z = z + 1
+	end
+	if pressed.A or pressed.Left then
+		x = x - 1
+	end
+	if pressed.D or pressed.Right then
+		x = x + 1
+	end
+
+	local localMove = Vector3.new(x, 0, z)
+	if localMove.Magnitude > 1 then
+		localMove = localMove.Unit
+	end
+	if localMove.Magnitude <= 0 then
+		return Vector3.zero
+	end
+
+	local rootRot = rootCF - rootCF.Position
+	return rootRot:VectorToWorldSpace(localMove)
 end
 
 local function keysSnapshot()
@@ -317,8 +474,8 @@ local function keyNameToVirtualKeyCode(keyName)
 	return map[keyName]
 end
 
-local function sendVirtualInputState(keyName, isDown)
-	if not virtualInputPlaybackEnabled then
+local function sendVirtualInputState(keyName, isDown, forceSend)
+	if (not forceSend) and (not virtualInputPlaybackEnabled) then
 		return
 	end
 
@@ -368,7 +525,7 @@ end
 local function releaseAllVirtualInputs()
 	for keyName, isPressed in pairs(virtualPressed) do
 		if isPressed then
-			sendVirtualInputState(keyName, false)
+			sendVirtualInputState(keyName, false, true)
 		end
 	end
 	virtualPressed = {}
@@ -400,7 +557,7 @@ local function syncVirtualInputsToFrame(frame)
 end
 
 local function char()
-	return player.Character or player.CharacterAdded:Wait()
+	return player.Character
 end
 
 local function humanoidAndRoot()
@@ -478,7 +635,7 @@ local function applyPlaybackLock()
 		}
 	end
 
-	if playbackMode == "smooth" and not frozen then
+	if (playbackMode == "smooth" or playbackMode == "physics") and not frozen then
 		hum.WalkSpeed = playbackState.saved.WalkSpeed
 		hum.JumpPower = playbackState.saved.JumpPower
 		hum.AutoRotate = true
@@ -514,6 +671,11 @@ local function clearPlaybackLock()
 	end
 	if saved and saved.MouseBehavior then
 		UIS.MouseBehavior = saved.MouseBehavior
+		if (not isTouchDevice) and saved.MouseBehavior ~= Enum.MouseBehavior.LockCenter and isShiftLockActive() then
+			-- If Roblox left lock-center active, force one toggle back to unlocked state.
+			callRobloxShiftLockToggle()
+			UIS.MouseBehavior = saved.MouseBehavior
+		end
 	end
 	shiftLockState = isShiftLockActive()
 
@@ -598,18 +760,27 @@ local function normalizeFrame(rawFrame)
 
 	-- v0.1/v0.2 compatibility (root/vel/cam/fov keys)
 	if rawFrame.root and rawFrame.cam then
-		local dt = tonumber(rawFrame.dt) or CONFIG.DEFAULT_FRAME_DT
+		local root = sanitizeCFrameTable(rawFrame.root)
+		local cam = sanitizeCFrameTable(rawFrame.cam)
+		if not root or not cam then
+			return nil
+		end
+
+		local dt = toFiniteNumber(rawFrame.dt, CONFIG.DEFAULT_FRAME_DT)
+		dt = math.clamp(dt, 1 / 1000, 1)
+		local fov = math.clamp(toFiniteNumber(rawFrame.fov, 70), 1, 120)
+		local hstate = type(rawFrame.hstate) == "string" and rawFrame.hstate or nil
 		return {
-			dt = math.max(dt, 1 / 1000),
-			root = rawFrame.root,
-			vel = rawFrame.vel or { 0, 0, 0 },
-			rotvel = rawFrame.rotvel or { 0, 0, 0 },
-			cam = rawFrame.cam,
-			cam_local = rawFrame.cam_local,
-			fov = tonumber(rawFrame.fov) or 70,
-			hstate = rawFrame.hstate,
+			dt = dt,
+			root = root,
+			vel = sanitizeV3Table(rawFrame.vel, { 0, 0, 0 }),
+			rotvel = sanitizeV3Table(rawFrame.rotvel, { 0, 0, 0 }),
+			cam = cam,
+			cam_local = sanitizeCFrameTable(rawFrame.cam_local),
+			fov = fov,
+			hstate = hstate,
 			shiftlock = (rawFrame.shiftlock == true),
-			keys = type(rawFrame.keys) == "table" and rawFrame.keys or {},
+			keys = sanitizeFrameKeys(rawFrame.keys),
 		}
 	end
 
@@ -618,16 +789,19 @@ end
 
 local function normalizeFrames(rawFrames)
 	if type(rawFrames) ~= "table" then
-		return {}
+		return {}, 0
 	end
 	local out = {}
-	for i, frame in ipairs(rawFrames) do
+	local dropped = 0
+	for _, frame in ipairs(rawFrames) do
 		local n = normalizeFrame(frame)
 		if n then
-			out[i] = n
+			table.insert(out, n)
+		else
+			dropped = dropped + 1
 		end
 	end
-	return out
+	return out, dropped
 end
 
 local function applyFrame(i)
@@ -657,11 +831,38 @@ local function applyFrame(i)
 	end
 
 	setShiftLockState(frame.shiftlock == true)
+	local pressed = pressedMapFromFrame(frame)
 
-	if playbackMode == "ghost" or playbackMode == "physics" or frozen then
+	if playbackMode == "ghost" or frozen then
 		hrp.CFrame = rootCF
 		hrp.AssemblyLinearVelocity = tableToV3(frame.vel)
 		hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
+	elseif playbackMode == "physics" then
+		local targetVel = tableToV3(frame.vel)
+		local posError = rootCF.Position - hrp.Position
+		local dist = posError.Magnitude
+		local moveDir = movementFromPressedMap(pressed, rootCF)
+
+		hum:Move(moveDir, false)
+		if pressed.Space or pressed.Up then
+			hum.Jump = true
+		end
+
+		if dist > CONFIG.PHYSICS_HARD_SNAP_DISTANCE then
+			hrp.CFrame = rootCF
+			hrp.AssemblyLinearVelocity = targetVel
+			hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
+		else
+			local correctionVel = posError * CONFIG.PHYSICS_SOFT_CORRECTION_GAIN
+			local correctionMag = correctionVel.Magnitude
+			if correctionMag > CONFIG.PHYSICS_MAX_CORRECTION_SPEED and correctionMag > 0 then
+				correctionVel = correctionVel.Unit * CONFIG.PHYSICS_MAX_CORRECTION_SPEED
+			end
+
+			local desiredVel = targetVel + correctionVel
+			hrp.AssemblyLinearVelocity = hrp.AssemblyLinearVelocity:Lerp(desiredVel, CONFIG.PHYSICS_VELOCITY_BLEND)
+			hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
+		end
 	else
 		local targetVel = tableToV3(frame.vel)
 		local posError = rootCF.Position - hrp.Position
@@ -708,7 +909,11 @@ local function applyFrame(i)
 	end
 	camera.FieldOfView = tonumber(frame.fov) or 70
 	if mode == "play" and not frozen then
-		syncVirtualInputsToFrame(frame)
+		if playbackMode == "physics" then
+			releaseAllVirtualInputs()
+		else
+			syncVirtualInputsToFrame(frame)
+		end
 	elseif mode == "play" and frozen then
 		releaseAllVirtualInputs()
 	end
@@ -1384,6 +1589,7 @@ local function cyclePlaybackMode()
 	playbackMode = nextMode
 	if mode == "play" then
 		setCameraPlaybackMode(true)
+		resetCameraSmoothingClock()
 		applyPlaybackLock()
 	end
 	log("Playback mode set to " .. playbackMode)
@@ -1413,7 +1619,7 @@ local function cycleRecordMode()
 	refreshSettingsUI()
 end
 
-settingsInputsBtn.MouseButton1Click:Connect(function()
+connect(settingsInputsBtn.MouseButton1Click, function()
 	virtualInputPlaybackEnabled = not virtualInputPlaybackEnabled
 	if not virtualInputPlaybackEnabled then
 		releaseAllVirtualInputs()
@@ -1422,7 +1628,7 @@ settingsInputsBtn.MouseButton1Click:Connect(function()
 	refreshSettingsUI()
 end)
 
-settingsOverlayBtn.MouseButton1Click:Connect(function()
+connect(settingsOverlayBtn.MouseButton1Click, function()
 	inputOverlayEnabled = not inputOverlayEnabled
 	if not inputOverlayEnabled then
 		updatePlaybackInputOverlay(nil)
@@ -1431,10 +1637,10 @@ settingsOverlayBtn.MouseButton1Click:Connect(function()
 	refreshSettingsUI()
 end)
 
-settingsPlaybackModeBtn.MouseButton1Click:Connect(cyclePlaybackMode)
-settingsCameraModeBtn.MouseButton1Click:Connect(cycleCameraMode)
+connect(settingsPlaybackModeBtn.MouseButton1Click, cyclePlaybackMode)
+connect(settingsCameraModeBtn.MouseButton1Click, cycleCameraMode)
 
-settingsRecordNoColBtn.MouseButton1Click:Connect(function()
+connect(settingsRecordNoColBtn.MouseButton1Click, function()
 	recordNoCollisionEnabled = not recordNoCollisionEnabled
 	if not recordNoCollisionEnabled then
 		clearRecordNoCollision()
@@ -1445,9 +1651,9 @@ settingsRecordNoColBtn.MouseButton1Click:Connect(function()
 	refreshSettingsUI()
 end)
 
-settingsRecordModeBtn.MouseButton1Click:Connect(cycleRecordMode)
+connect(settingsRecordModeBtn.MouseButton1Click, cycleRecordMode)
 
-settingsPlaySpeedBtn.MouseButton1Click:Connect(function()
+connect(settingsPlaySpeedBtn.MouseButton1Click, function()
 	local nextSpeed = playbackSpeed + 0.25
 	if nextSpeed > 2 then
 		nextSpeed = 0.5
@@ -1457,7 +1663,7 @@ settingsPlaySpeedBtn.MouseButton1Click:Connect(function()
 	refreshSettingsUI()
 end)
 
-settingsToggleBtn.MouseButton1Click:Connect(function()
+connect(settingsToggleBtn.MouseButton1Click, function()
 	settingsOpen = not settingsOpen
 	applySettingsVisibility()
 end)
@@ -1475,26 +1681,37 @@ end
 gui.Parent = getUIParent()
 playIntroAnimation()
 applySettingsVisibility()
+refreshSettingsUI()
 
-local function updateUI()
-	label.Text = statusText()
+updateUI = function()
+	local newStatusText = statusText()
+	if label.Text ~= newStatusText then
+		label.Text = newStatusText
+	end
 	if shiftLockIndicator then
 		local shiftOn = isShiftLockActive()
-		shiftLockIndicator.Text = "ShiftLock REC: " .. (shiftOn and "ON" or "OFF")
-		if shiftOn then
-			shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(32, 95, 63)
-			shiftLockIndicator.TextColor3 = Color3.fromRGB(210, 255, 231)
-		else
-			shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(76, 40, 40)
-			shiftLockIndicator.TextColor3 = Color3.fromRGB(255, 226, 226)
+		if lastShiftIndicatorState == nil or shiftOn ~= lastShiftIndicatorState then
+			shiftLockIndicator.Text = "ShiftLock REC: " .. (shiftOn and "ON" or "OFF")
+			if shiftOn then
+				shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(32, 95, 63)
+				shiftLockIndicator.TextColor3 = Color3.fromRGB(210, 255, 231)
+			else
+				shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(76, 40, 40)
+				shiftLockIndicator.TextColor3 = Color3.fromRGB(255, 226, 226)
+			end
+			lastShiftIndicatorState = shiftOn
 		end
 	end
 	if inputOverlayFrame then
-		inputOverlayFrame.Visible = (mode == "play" and inputOverlayEnabled)
+		local shouldShowOverlay = (mode == "play" and inputOverlayEnabled)
+		if inputOverlayFrame.Visible ~= shouldShowOverlay then
+			inputOverlayFrame.Visible = shouldShowOverlay
+		end
 	end
-	refreshSettingsUI()
-	applySettingsVisibility()
-	gui.Enabled = (uiVisible and not forceHideUI)
+	local shouldEnableGui = (uiVisible and not forceHideUI)
+	if gui.Enabled ~= shouldEnableGui then
+		gui.Enabled = shouldEnableGui
+	end
 end
 
 local function getCurrentFrameIndex()
@@ -1509,6 +1726,9 @@ end
 
 local function setCheckpoint(name, index)
 	name = tostring(name or QUICK_CP_NAME)
+	if #name > 64 then
+		name = string.sub(name, 1, 64)
+	end
 	local resolved = index and clampIndex(index) or getCurrentFrameIndex()
 	if resolved < 1 or resolved > #frames then
 		log("Cannot set checkpoint '" .. name .. "': invalid frame")
@@ -1521,9 +1741,15 @@ end
 
 local function gotoCheckpoint(name)
 	name = tostring(name or QUICK_CP_NAME)
-	local idx = checkpoints[name]
-	if not idx then
+	local idxRaw = checkpoints[name]
+	if idxRaw == nil then
 		log("Checkpoint '" .. name .. "' not found")
+		return false
+	end
+	local idx = tonumber(idxRaw)
+	if not isFiniteNumber(idx) then
+		checkpoints[name] = nil
+		log("Checkpoint '" .. name .. "' is invalid and was removed")
 		return false
 	end
 	playIndex = clampIndex(idx)
@@ -1609,6 +1835,7 @@ local function setFrozen(newFrozen)
 
 	if mode == "play" then
 		setCameraPlaybackMode(true)
+		resetCameraSmoothingClock()
 		applyPlaybackLock()
 	end
 end
@@ -1699,10 +1926,6 @@ local function stopPlay()
 	clearPlaybackLock()
 	setCameraPlaybackMode(false)
 	resetCameraSmoothingClock()
-	if not isTouchDevice then
-		-- Safety unlock: prevent stuck lock-center after playback finishes.
-		UIS.MouseBehavior = Enum.MouseBehavior.Default
-	end
 	log("Playback stopped")
 end
 
@@ -1720,6 +1943,12 @@ local function saveReplay()
 end
 
 local function loadReplay()
+	if mode == "play" then
+		stopPlay()
+	elseif mode == "record" then
+		stopRecord()
+	end
+
 	if not isfile(replayPath) then
 		log("Replay file not found: " .. replayPath)
 		return
@@ -1733,17 +1962,24 @@ local function loadReplay()
 		return
 	end
 
-	local normalized = normalizeFrames(data.frames)
+	local normalized, droppedFrames = normalizeFrames(data.frames)
 	if #normalized == 0 then
 		log("Replay loaded but no valid frames found")
 		return
 	end
 
 	frames = normalized
-	checkpoints = type(data.checkpoints) == "table" and data.checkpoints or {}
+	local loadedCheckpoints, droppedCheckpoints = sanitizeCheckpoints(data.checkpoints, #frames)
+	checkpoints = loadedCheckpoints
 	playIndex = 1
 	lastTrimmedCount = 0
 	log("Loaded replay. Frames: " .. tostring(#frames))
+	if droppedFrames > 0 then
+		log("Dropped invalid frames: " .. tostring(droppedFrames))
+	end
+	if droppedCheckpoints > 0 then
+		log("Dropped invalid checkpoints: " .. tostring(droppedCheckpoints))
+	end
 end
 
 local function eraseReplay()
@@ -1880,6 +2116,7 @@ local function runCommand(raw)
 		playbackMode = newMode
 		if mode == "play" then
 			setCameraPlaybackMode(true)
+			resetCameraSmoothingClock()
 			applyPlaybackLock()
 		end
 		log("Playback mode set to " .. playbackMode)
@@ -1966,7 +2203,7 @@ local function runCommand(raw)
 	log("Unknown command: " .. cmd .. " (use 'help')")
 end
 
-UIS.InputBegan:Connect(function(input, gp)
+connect(UIS.InputBegan, function(input, gp)
 	if input.UserInputType == Enum.UserInputType.Keyboard then
 		local keyName = input.KeyCode.Name
 		if shouldCaptureVirtualKey(keyName) then
@@ -2070,7 +2307,7 @@ UIS.InputBegan:Connect(function(input, gp)
 	updateUI()
 end)
 
-UIS.InputEnded:Connect(function(input)
+connect(UIS.InputEnded, function(input)
 	if input.UserInputType == Enum.UserInputType.Keyboard then
 		heldKeys[input.KeyCode.Name] = nil
 	elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -2086,7 +2323,7 @@ UIS.InputEnded:Connect(function(input)
 	end
 end)
 
-commandBar.FocusLost:Connect(function(enterPressed)
+connect(commandBar.FocusLost, function(enterPressed)
 	if enterPressed then
 		runCommand(commandBar.Text)
 	end
@@ -2094,7 +2331,7 @@ commandBar.FocusLost:Connect(function(enterPressed)
 	updateUI()
 end)
 
-RunService.RenderStepped:Connect(function(dt)
+connect(RunService.RenderStepped, function(dt)
 	local nowClock = tick()
 	local clockDtRecord = 0
 	local clockDtPlay = 0
@@ -2216,7 +2453,7 @@ RunService.RenderStepped:Connect(function(dt)
 	updateUI()
 end)
 
-player.CharacterAdded:Connect(function()
+connect(player.CharacterAdded, function()
 	if mode == "record" then
 		task.wait(0.05)
 		applyRecordNoCollision()
@@ -2226,6 +2463,44 @@ player.CharacterAdded:Connect(function()
 		applyPlaybackLock()
 	end
 end)
+
+runtime.cleanup = function()
+	if runtime.destroyed then
+		return
+	end
+	runtime.destroyed = true
+
+	pcall(function()
+		mode = "idle"
+		frozen = false
+		seekDir = 0
+	end)
+	pcall(releaseAllVirtualInputs)
+	pcall(function()
+		if updatePlaybackInputOverlay then
+			updatePlaybackInputOverlay(nil)
+		end
+	end)
+	pcall(clearPlaybackLock)
+	pcall(clearRecordFreezeLock)
+	pcall(clearRecordNoCollision)
+	pcall(function()
+		setCameraPlaybackMode(false)
+		camera.CameraType = Enum.CameraType.Custom
+		if not isTouchDevice then
+			UIS.MouseBehavior = Enum.MouseBehavior.Default
+		end
+	end)
+	pcall(disconnectAllConnections)
+	pcall(function()
+		if gui and gui.Parent then
+			gui:Destroy()
+		end
+	end)
+	if rawget(_G, RUNTIME_KEY) == runtime then
+		_G[RUNTIME_KEY] = nil
+	end
+end
 
 shiftLockState = isShiftLockActive()
 
