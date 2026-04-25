@@ -40,6 +40,7 @@ local CONFIG = {
 	PLAYBACK_MAX_ACCUMULATOR = 0.35, -- seconds; drops excessive backlog to avoid slow-motion replay
 	PLAYBACK_MAX_STEPS_PER_RENDER = 24, -- max simulated replay steps per render frame
 	PLAYBACK_MODE = "physics", -- "ghost" | "physics" | "smooth"
+	PHYSICS_CAMERA_SMOOTH_RATE = 22, -- higher = snappier, lower = smoother
 	PHYSICS_SNAP_DISTANCE = 10,
 	PHYSICS_SOFT_PULL_DISTANCE = 1.25,
 	PHYSICS_SOFT_CORRECTION_GAIN = 7.0,
@@ -125,6 +126,9 @@ local overlayMouseState = {
 	vy = 0,
 	tx = 0,
 	ty = 0,
+	lastUpdate = 0,
+}
+local cameraSmoothState = {
 	lastUpdate = 0,
 }
 
@@ -438,6 +442,23 @@ local function setCameraPlaybackMode(enabled)
 	end
 end
 
+local function resetCameraSmoothingClock()
+	cameraSmoothState.lastUpdate = tick()
+end
+
+local function smoothCameraTo(targetCF)
+	local now = tick()
+	local dt
+	if cameraSmoothState.lastUpdate > 0 then
+		dt = math.clamp(now - cameraSmoothState.lastUpdate, 1 / 240, 0.06)
+	else
+		dt = 1 / 60
+	end
+	cameraSmoothState.lastUpdate = now
+	local alpha = 1 - math.exp(-CONFIG.PHYSICS_CAMERA_SMOOTH_RATE * dt)
+	camera.CFrame = camera.CFrame:Lerp(targetCF, alpha)
+end
+
 local function applyPlaybackLock()
 	local hum, hrp = humanoidAndRoot()
 	if not hum or not hrp then
@@ -492,10 +513,21 @@ local function clearPlaybackLock()
 	if hrp and hrp.Parent and saved then
 		hrp.Anchored = saved.Anchored
 	end
-	if saved and saved.MouseBehavior then
+	shiftLockState = (saved and saved.ShiftLockState == true) or false
+	if not isTouchDevice then
+		if saved and saved.ShiftLockState == true then
+			setShiftLockState(true)
+		else
+			-- Force unlock in case Roblox leaves lock-center active after scripted playback.
+			UIS.MouseBehavior = Enum.MouseBehavior.Default
+			if isShiftLockActive() then
+				callRobloxShiftLockToggle()
+				UIS.MouseBehavior = Enum.MouseBehavior.Default
+			end
+		end
+	elseif saved and saved.MouseBehavior then
 		UIS.MouseBehavior = saved.MouseBehavior
 	end
-	shiftLockState = (saved and saved.ShiftLockState == true) or false
 
 	playbackState.active = false
 	playbackState.humanoid = nil
@@ -677,8 +709,8 @@ local function applyFrame(i)
 				camera.CFrame = camCF
 			end
 		elseif playbackMode == "physics" and not frozen then
-			-- Physics mode uses recorded world camera directly to avoid local-space jitter.
-			camera.CFrame = camCF
+			-- Physics mode uses smoothed recorded world camera to reduce visible jitter.
+			smoothCameraTo(camCF)
 		else
 			camera.CFrame = camCF
 		end
@@ -1066,12 +1098,14 @@ logCorner.Parent = logLabel
 
 inputOverlayFrame = Instance.new("Frame")
 inputOverlayFrame.Size = UDim2.fromOffset(430, 190)
-inputOverlayFrame.Position = UDim2.new(1, -442, 1, -198)
+inputOverlayFrame.AnchorPoint = Vector2.new(1, 1)
+inputOverlayFrame.Position = UDim2.new(1, -16, 1, -16)
 inputOverlayFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 inputOverlayFrame.BackgroundTransparency = 0.2
 inputOverlayFrame.BorderSizePixel = 0
 inputOverlayFrame.Visible = false
-inputOverlayFrame.Parent = mainFrame
+inputOverlayFrame.ZIndex = 15
+inputOverlayFrame.Parent = gui
 
 local inputOverlayCorner = Instance.new("UICorner")
 inputOverlayCorner.CornerRadius = UDim.new(0, 10)
@@ -1203,6 +1237,13 @@ inputOverlayLabel.TextSize = 11
 inputOverlayLabel.TextColor3 = Color3.fromRGB(208, 220, 242)
 inputOverlayLabel.Text = "Playback Input Overlay"
 inputOverlayLabel.Parent = inputOverlayFrame
+
+for _, overlayGui in ipairs(inputOverlayFrame:GetDescendants()) do
+	if overlayGui:IsA("GuiObject") then
+		overlayGui.ZIndex = 16
+	end
+end
+inputOverlayFrame.ZIndex = 15
 
 local loadingOverlay = Instance.new("Frame")
 loadingOverlay.Size = UDim2.fromScale(1, 1)
@@ -1624,6 +1665,7 @@ local function startPlay()
 	updatePlaybackInputOverlay(nil)
 	clearRecordNoCollision()
 	setCameraPlaybackMode(true)
+	resetCameraSmoothingClock()
 	applyPlaybackLock()
 	applyFrame(playIndex)
 	playIndex = math.min(playIndex + 1, #frames + 1)
@@ -1645,6 +1687,11 @@ local function stopPlay()
 	updatePlaybackInputOverlay(nil)
 	clearPlaybackLock()
 	setCameraPlaybackMode(false)
+	resetCameraSmoothingClock()
+	if not isTouchDevice then
+		-- Safety unlock: prevent stuck lock-center after playback finishes.
+		UIS.MouseBehavior = Enum.MouseBehavior.Default
+	end
 	log("Playback stopped")
 end
 
