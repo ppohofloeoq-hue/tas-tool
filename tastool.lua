@@ -46,6 +46,13 @@ local CONFIG = {
 	PHYSICS_MAX_CORRECTION_SPEED = 26,
 	PHYSICS_VELOCITY_BLEND = 0.55,
 	PHYSICS_CORRECTION_BLEND = 0.35,
+	OVERLAY_MOUSE_RADIUS = 58,
+	OVERLAY_MOUSE_SENSITIVITY = 420,
+	OVERLAY_MOUSE_DEADZONE = 0.75,
+	OVERLAY_MOUSE_TARGET_SMOOTH = 18,
+	OVERLAY_MOUSE_SPRING = 145,
+	OVERLAY_MOUSE_DAMPING = 14,
+	OVERLAY_MOUSE_IDLE_RETURN = 0.88,
 	LOG_LINES = 8,
 	FOLDER = "TASLite",
 	FILE_NAME = "Replay.json",
@@ -98,6 +105,7 @@ local settingsPlaybackModeBtn
 local settingsRecordNoColBtn
 local settingsRecordModeBtn
 local settingsPlaySpeedBtn
+local settingsOverlayBtn
 local inputOverlayFrame
 local inputOverlayLabel
 local shiftLockIndicator
@@ -108,6 +116,17 @@ local mouseLeftCap
 local mouseRightCap
 local mouseDot
 local updatePlaybackInputOverlay
+local inputOverlayEnabled = true
+local lastOverlayCamLocalCF = nil
+local overlayMouseState = {
+	x = 0,
+	y = 0,
+	vx = 0,
+	vy = 0,
+	tx = 0,
+	ty = 0,
+	lastUpdate = 0,
+}
 
 local VIRTUAL_INPUT_BLACKLIST = {
 	F2 = true,
@@ -650,13 +669,16 @@ local function applyFrame(i)
 		end
 	end
 	if shouldReplayDriveCamera() then
-		if (playbackMode == "physics" or playbackMode == "smooth") and not frozen then
+		if playbackMode == "smooth" and not frozen then
 			local camLocalCF = tableToCf(frame.cam_local)
 			if camLocalCF then
 				camera.CFrame = hrp.CFrame * camLocalCF
 			else
 				camera.CFrame = camCF
 			end
+		elseif playbackMode == "physics" and not frozen then
+			-- Physics mode uses recorded world camera directly to avoid local-space jitter.
+			camera.CFrame = camCF
 		else
 			camera.CFrame = camCF
 		end
@@ -684,13 +706,73 @@ local function setCapActive(capData, active)
 	end
 end
 
+local function resetOverlayMouseMotion()
+	overlayMouseState.x = 0
+	overlayMouseState.y = 0
+	overlayMouseState.vx = 0
+	overlayMouseState.vy = 0
+	overlayMouseState.tx = 0
+	overlayMouseState.ty = 0
+	overlayMouseState.lastUpdate = tick()
+end
+
+local function stepOverlayMouseMotion(targetX, targetY)
+	local now = tick()
+	local dt
+	if overlayMouseState.lastUpdate > 0 then
+		dt = math.clamp(now - overlayMouseState.lastUpdate, 1 / 240, 0.06)
+	else
+		dt = 1 / 60
+	end
+	overlayMouseState.lastUpdate = now
+
+	local targetLerp = math.clamp(dt * CONFIG.OVERLAY_MOUSE_TARGET_SMOOTH, 0, 1)
+	overlayMouseState.tx = overlayMouseState.tx + (targetX - overlayMouseState.tx) * targetLerp
+	overlayMouseState.ty = overlayMouseState.ty + (targetY - overlayMouseState.ty) * targetLerp
+
+	local ax = (overlayMouseState.tx - overlayMouseState.x) * CONFIG.OVERLAY_MOUSE_SPRING
+	local ay = (overlayMouseState.ty - overlayMouseState.y) * CONFIG.OVERLAY_MOUSE_SPRING
+	local damping = math.exp(-CONFIG.OVERLAY_MOUSE_DAMPING * dt)
+
+	overlayMouseState.vx = (overlayMouseState.vx + ax * dt) * damping
+	overlayMouseState.vy = (overlayMouseState.vy + ay * dt) * damping
+
+	overlayMouseState.x = overlayMouseState.x + overlayMouseState.vx * dt
+	overlayMouseState.y = overlayMouseState.y + overlayMouseState.vy * dt
+
+	if math.abs(targetX) < CONFIG.OVERLAY_MOUSE_DEADZONE and math.abs(targetY) < CONFIG.OVERLAY_MOUSE_DEADZONE then
+		overlayMouseState.x = overlayMouseState.x * CONFIG.OVERLAY_MOUSE_IDLE_RETURN
+		overlayMouseState.y = overlayMouseState.y * CONFIG.OVERLAY_MOUSE_IDLE_RETURN
+	end
+
+	local radius = CONFIG.OVERLAY_MOUSE_RADIUS
+	local magnitude = math.sqrt((overlayMouseState.x * overlayMouseState.x) + (overlayMouseState.y * overlayMouseState.y))
+	if magnitude > radius and magnitude > 0 then
+		local scale = radius / magnitude
+		overlayMouseState.x = overlayMouseState.x * scale
+		overlayMouseState.y = overlayMouseState.y * scale
+		overlayMouseState.vx = overlayMouseState.vx * 0.55
+		overlayMouseState.vy = overlayMouseState.vy * 0.55
+	end
+
+	local speed = math.sqrt((overlayMouseState.vx * overlayMouseState.vx) + (overlayMouseState.vy * overlayMouseState.vy))
+	return overlayMouseState.x, overlayMouseState.y, speed
+end
+
 updatePlaybackInputOverlay = function(frame)
 	if not inputOverlayFrame then
 		return
 	end
 
-	if mode ~= "play" or type(frame) ~= "table" then
+	if mode ~= "play" or type(frame) ~= "table" or not inputOverlayEnabled then
 		inputOverlayFrame.Visible = false
+		lastOverlayCamLocalCF = nil
+		resetOverlayMouseMotion()
+		if mouseDot then
+			mouseDot.Position = UDim2.fromOffset(94, 87)
+			mouseDot.BackgroundColor3 = Color3.fromRGB(255, 40, 40)
+			mouseDot.Size = UDim2.fromOffset(18, 18)
+		end
 		return
 	end
 
@@ -701,7 +783,7 @@ updatePlaybackInputOverlay = function(frame)
 		end
 	end
 
-	setCapActive(inputKeyCaps.Up, pressed.Space or pressed.Up)
+	setCapActive(inputKeyCaps.Up, pressed.LeftShift or pressed.RightShift)
 	setCapActive(inputKeyCaps.W, pressed.W)
 	setCapActive(inputKeyCaps.A, pressed.A)
 	setCapActive(inputKeyCaps.S, pressed.S)
@@ -713,13 +795,31 @@ updatePlaybackInputOverlay = function(frame)
 	setCapActive(mouseLeftCap, lmb)
 	setCapActive(mouseRightCap, rmb)
 
+	local camLocalCF = tableToCf(frame.cam_local) or tableToCf(frame.cam)
 	if mouseDot then
-		if lmb or rmb then
-			mouseDot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-		else
-			mouseDot.BackgroundColor3 = Color3.fromRGB(255, 40, 40)
+		local centerX, centerY = 94, 87
+		local targetX, targetY = 0, 0
+		local moving = false
+
+		if camLocalCF and lastOverlayCamLocalCF then
+			local delta = lastOverlayCamLocalCF:ToObjectSpace(camLocalCF)
+			local pitch, yaw = delta:ToOrientation()
+			targetX = math.clamp(yaw * CONFIG.OVERLAY_MOUSE_SENSITIVITY, -CONFIG.OVERLAY_MOUSE_RADIUS, CONFIG.OVERLAY_MOUSE_RADIUS)
+			targetY = math.clamp(-pitch * CONFIG.OVERLAY_MOUSE_SENSITIVITY, -CONFIG.OVERLAY_MOUSE_RADIUS, CONFIG.OVERLAY_MOUSE_RADIUS)
+			moving = (math.abs(targetX) + math.abs(targetY)) > CONFIG.OVERLAY_MOUSE_DEADZONE
 		end
+
+		local smoothedX, smoothedY, speed = stepOverlayMouseMotion(targetX, targetY)
+		local pulse = math.clamp(speed / 80, 0, 1)
+		local dotSize = math.floor(18 + (6 * pulse))
+		local dotX = centerX + smoothedX
+		local dotY = centerY + smoothedY
+
+		mouseDot.Size = UDim2.fromOffset(dotSize, dotSize)
+		mouseDot.Position = UDim2.fromOffset(dotX, dotY)
+		mouseDot.BackgroundColor3 = moving and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(255, 40, 40)
 	end
+	lastOverlayCamLocalCF = camLocalCF
 
 	inputOverlayFrame.Visible = true
 end
@@ -741,6 +841,10 @@ local function refreshSettingsUI()
 	end
 	if settingsPlaySpeedBtn then
 		settingsPlaySpeedBtn.Text = string.format("PlaySpeed: %.2f", playbackSpeed)
+	end
+	if settingsOverlayBtn then
+		settingsOverlayBtn.Text = "Overlay: " .. (inputOverlayEnabled and "ON" or "OFF")
+		settingsOverlayBtn.BackgroundColor3 = inputOverlayEnabled and Color3.fromRGB(31, 68, 98) or Color3.fromRGB(62, 38, 38)
 	end
 end
 
@@ -915,7 +1019,7 @@ settingsLayout.Parent = settingsFrame
 
 local function makeSettingButton()
 	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.fromOffset(145, 32)
+	btn.Size = UDim2.fromOffset(118, 32)
 	btn.BackgroundColor3 = Color3.fromRGB(27, 38, 56)
 	btn.BorderSizePixel = 0
 	btn.TextColor3 = Color3.fromRGB(230, 238, 255)
@@ -930,6 +1034,8 @@ end
 
 settingsInputsBtn = makeSettingButton()
 settingsInputsBtn.Parent = settingsFrame
+settingsOverlayBtn = makeSettingButton()
+settingsOverlayBtn.Parent = settingsFrame
 settingsPlaybackModeBtn = makeSettingButton()
 settingsPlaybackModeBtn.Parent = settingsFrame
 settingsRecordNoColBtn = makeSettingButton()
@@ -960,7 +1066,7 @@ logCorner.Parent = logLabel
 
 inputOverlayFrame = Instance.new("Frame")
 inputOverlayFrame.Size = UDim2.fromOffset(430, 190)
-inputOverlayFrame.Position = UDim2.new(1, -442, 0, 44)
+inputOverlayFrame.Position = UDim2.new(1, -442, 1, -198)
 inputOverlayFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 inputOverlayFrame.BackgroundTransparency = 0.2
 inputOverlayFrame.BorderSizePixel = 0
@@ -1265,6 +1371,15 @@ settingsInputsBtn.MouseButton1Click:Connect(function()
 	refreshSettingsUI()
 end)
 
+settingsOverlayBtn.MouseButton1Click:Connect(function()
+	inputOverlayEnabled = not inputOverlayEnabled
+	if not inputOverlayEnabled then
+		updatePlaybackInputOverlay(nil)
+	end
+	log("Input overlay set to " .. (inputOverlayEnabled and "on" or "off"))
+	refreshSettingsUI()
+end)
+
 settingsPlaybackModeBtn.MouseButton1Click:Connect(cyclePlaybackMode)
 
 settingsRecordNoColBtn.MouseButton1Click:Connect(function()
@@ -1323,7 +1438,7 @@ local function updateUI()
 		end
 	end
 	if inputOverlayFrame then
-		inputOverlayFrame.Visible = (mode == "play")
+		inputOverlayFrame.Visible = (mode == "play" and inputOverlayEnabled)
 	end
 	refreshSettingsUI()
 	applySettingsVisibility()
@@ -1596,6 +1711,7 @@ local function commandHelp()
 	log("setspeed <number>")
 	log("playspeed <number>")
 	log("inputs <on|off>")
+	log("overlay <on|off>")
 	log("recordnocollision <on|off>")
 	log("playbackmode <ghost|physics|smooth>")
 	log("recordmode <replace|append>")
@@ -1660,6 +1776,21 @@ local function runCommand(raw)
 			releaseAllVirtualInputs()
 		end
 		log("Virtual input playback set to " .. modeArg)
+		refreshSettingsUI()
+		return
+	end
+
+	if cmd == "overlay" then
+		local modeArg = string.lower(args[2] or "")
+		if modeArg ~= "on" and modeArg ~= "off" then
+			log("Usage: overlay <on|off>")
+			return
+		end
+		inputOverlayEnabled = (modeArg == "on")
+		if not inputOverlayEnabled then
+			updatePlaybackInputOverlay(nil)
+		end
+		log("Input overlay set to " .. modeArg)
 		refreshSettingsUI()
 		return
 	end
