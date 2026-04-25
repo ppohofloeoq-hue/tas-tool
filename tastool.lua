@@ -29,7 +29,7 @@ Slash (/) - focus command bar
 ]]
 
 local CONFIG = {
-	ROUND_DIGITS = 3,
+	ROUND_DIGITS = 4,
 	TIMELINE_FPS = 60,
 	DEFAULT_FRAME_DT = 1 / 60,
 	VIRTUAL_INPUT_PLAYBACK = true,
@@ -223,12 +223,19 @@ local function isShiftLockActive()
 end
 
 local function setShiftLockState(enabled, forceApply)
-	shiftLockState = (enabled == true)
+	local newState = (enabled == true)
+	local changed = (shiftLockState ~= newState)
+	shiftLockState = newState
 	if isTouchDevice then
 		return
 	end
 
 	local desired = shiftLockState and Enum.MouseBehavior.LockCenter or Enum.MouseBehavior.Default
+	if changed then
+		pcall(function()
+			ContextActionService:CallFunction("MouseLockSwitchAction", Enum.UserInputState.Begin, game)
+		end)
+	end
 	if forceApply or UIS.MouseBehavior ~= desired then
 		UIS.MouseBehavior = desired
 	end
@@ -867,9 +874,7 @@ local function applyFrame(i)
 
 	if mode == "play" then
 		local frameShiftLock = (frame.shiftlock == true)
-		if frameShiftLock ~= shiftLockState then
-			setShiftLockState(frameShiftLock, false)
-		end
+		setShiftLockState(frameShiftLock, false)
 	end
 	local pressed = pressedMapFromFrame(frame)
 
@@ -880,77 +885,11 @@ local function applyFrame(i)
 		lastPhysicsJumpHeld = false
 	elseif playbackMode == "physics" then
 		local targetVel = tableToV3(frame.vel)
-		local posError = rootCF.Position - hrp.Position
-		local dist = posError.Magnitude
-		local moveDir = movementFromPressedMap(pressed, camCF)
-		if moveDir.Magnitude <= 0 then
-			moveDir = movementFromVelocity(targetVel)
-		end
-
-		if moveDir.Magnitude > 0 then
-			hum:Move(moveDir, false)
-		else
-			hum:Move(Vector3.zero, false)
-		end
-
-		local jumpHeld = (pressed.Space or pressed.Up) == true
-		if jumpHeld and not lastPhysicsJumpHeld then
-			hum.Jump = true
-		end
-		lastPhysicsJumpHeld = jumpHeld
-
-		if dist > CONFIG.PHYSICS_HARD_SNAP_DISTANCE then
-			hrp.CFrame = rootCF
-			hrp.AssemblyLinearVelocity = targetVel
-			hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
-		else
-			local planarError = Vector3.new(posError.X, 0, posError.Z)
-			local planarCorrection = Vector3.zero
-			local planarDist = planarError.Magnitude
-			if planarDist > CONFIG.PHYSICS_SOFT_PULL_DISTANCE then
-				planarCorrection = clampVectorMagnitude(
-					planarError * CONFIG.PHYSICS_SOFT_CORRECTION_GAIN,
-					CONFIG.PHYSICS_MAX_CORRECTION_SPEED
-				)
-			end
-
-			local verticalCorrection = 0
-			if math.abs(posError.Y) > 0.15 then
-				verticalCorrection = math.clamp(
-					posError.Y * CONFIG.PHYSICS_VERTICAL_CORRECTION_GAIN,
-					-CONFIG.PHYSICS_MAX_VERTICAL_CORRECTION_SPEED,
-					CONFIG.PHYSICS_MAX_VERTICAL_CORRECTION_SPEED
-				)
-			end
-			local desiredVel = targetVel + planarCorrection + Vector3.new(0, verticalCorrection, 0)
-			local velBlend = math.clamp(
-				CONFIG.PHYSICS_VELOCITY_BLEND + (dist * CONFIG.PHYSICS_DYNAMIC_BLEND_GAIN),
-				CONFIG.PHYSICS_MIN_BLEND,
-				CONFIG.PHYSICS_MAX_BLEND
-			)
-			hrp.AssemblyLinearVelocity = hrp.AssemblyLinearVelocity:Lerp(desiredVel, velBlend)
-			hrp.AssemblyAngularVelocity = hrp.AssemblyAngularVelocity:Lerp(
-				tableToV3(frame.rotvel),
-				CONFIG.PHYSICS_ANGULAR_BLEND
-			)
-
-			local targetRot = nil
-			local targetForward = Vector3.new(rootCF.LookVector.X, 0, rootCF.LookVector.Z)
-			if targetForward.Magnitude > 0.0001 then
-				targetRot = CFrame.lookAt(Vector3.zero, targetForward.Unit)
-			end
-			local currentPos = hrp.Position
-			local currentRot = hrp.CFrame - currentPos
-			if targetRot then
-				local orientBlend = math.clamp(
-					CONFIG.PHYSICS_ORIENTATION_BLEND + (dist * CONFIG.PHYSICS_ORIENTATION_DYNAMIC_GAIN),
-					CONFIG.PHYSICS_ORIENTATION_MIN_BLEND,
-					CONFIG.PHYSICS_ORIENTATION_MAX_BLEND
-				)
-				local blendedRot = currentRot:Lerp(targetRot, orientBlend)
-				hrp.CFrame = CFrame.new(currentPos) * (blendedRot - blendedRot.Position)
-			end
-		end
+		lastPhysicsJumpHeld = false
+		-- Deterministic physics playback: follow recorded transform exactly to avoid drift/shake.
+		hrp.CFrame = rootCF
+		hrp.AssemblyLinearVelocity = targetVel
+		hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
 	else
 		local targetVel = tableToV3(frame.vel)
 		local posError = rootCF.Position - hrp.Position
@@ -987,11 +926,7 @@ local function applyFrame(i)
 				camera.CFrame = camCF
 			end
 		elseif playbackMode == "physics" and not frozen then
-			local camLocalCF = tableToCf(frame.cam_local)
 			local targetCamCF = camCF
-			if camLocalCF then
-				targetCamCF = hrp.CFrame * camLocalCF
-			end
 			if cameraMode == "exact" then
 				camera.CFrame = targetCamCF
 			else
@@ -1911,10 +1846,13 @@ local function setFrozen(newFrozen)
 			else
 				playIndex = 1
 			end
+			recordAccumulator = 0
 			applyRecordFreezeLock()
 		else
 			trimFutureFrames()
 			clearRecordFreezeLock()
+			recordAccumulator = 0
+			lastRecordClock = tick()
 			local hum, hrp = humanoidAndRoot()
 			if hrp then
 				-- Safety unstick: explicitly release anchor and resume gravity state.
@@ -1951,7 +1889,7 @@ local function startRecord()
 	clearRecordNoCollision()
 	setCameraPlaybackMode(false)
 	applyRecordNoCollision()
-	shiftLockState = isShiftLockActive()
+	shiftLockState = isMouseLockCenter()
 	lastRecordedShiftLockState = shiftLockState
 	lastAppliedHumanoidState = nil
 	lastPhysicsJumpHeld = false
@@ -2675,7 +2613,7 @@ runtime.cleanup = function()
 	end
 end
 
-shiftLockState = isShiftLockActive()
+shiftLockState = isMouseLockCenter()
 
 log("Loaded v0.9.2. PlaceId: " .. tostring(game.PlaceId))
 log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics|smooth')")
