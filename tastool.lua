@@ -1,5 +1,5 @@
 --[[
-TAS Lite v0.8.1 (Roblox, LocalScript/executor)
+TAS Lite v0.8.2 (Roblox, LocalScript/executor)
 - Stable record/playback timing
 - Freeze/seek with safe frame indexing
 - Checkpoints + append recording mode
@@ -28,13 +28,13 @@ local CONFIG = {
 	ROUND_DIGITS = 3,
 	DEFAULT_FRAME_DT = 1 / 60,
 	FIXED_RECORD_DT = true, -- Ignore render lag while recording for stable playback speed.
-	RECORD_NO_COLLISION = true, -- Disable character collisions while recording.
+	RECORD_NO_COLLISION = false, -- Keep touch/collision triggers active while recording.
 	SEEK_SPEED = 1, -- frames per render step while holding T/Y
 	PLAYBACK_SPEED = 1, -- realtime multiplier
 	PLAYBACK_USE_RECORDED_DT = false, -- false: replay speed ignores laggy recorded dt
 	PLAYBACK_MAX_ACCUMULATOR = 0.35, -- seconds; drops excessive backlog to avoid slow-motion replay
-	PLAYBACK_MAX_STEPS_PER_RENDER = 8, -- max simulated replay steps per render frame
-	PLAYBACK_MODE = "physics", -- "ghost" | "physics"
+	PLAYBACK_MAX_STEPS_PER_RENDER = 24, -- max simulated replay steps per render frame
+	PLAYBACK_MODE = "physics", -- "ghost" | "physics" | "smooth"
 	PHYSICS_SNAP_DISTANCE = 10,
 	PHYSICS_SOFT_PULL_DISTANCE = 1.25,
 	PHYSICS_SOFT_CORRECTION_GAIN = 7.0,
@@ -50,6 +50,7 @@ local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
+local ContextActionService = game:GetService("ContextActionService")
 
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
@@ -95,16 +96,45 @@ local function isShiftLockActive()
 	return UIS.MouseBehavior == Enum.MouseBehavior.LockCenter
 end
 
+local function callRobloxShiftLockToggle()
+	pcall(function()
+		ContextActionService:CallFunction("MouseLockSwitchAction", Enum.UserInputState.Begin, game)
+	end)
+end
+
 local function setShiftLockState(enabled)
 	shiftLockState = (enabled == true)
-	if not isTouchDevice then
+	if isTouchDevice then
+		return
+	end
+
+	if isShiftLockActive() ~= shiftLockState then
+		callRobloxShiftLockToggle()
+	end
+	if isShiftLockActive() ~= shiftLockState then
 		UIS.MouseBehavior = shiftLockState and Enum.MouseBehavior.LockCenter or Enum.MouseBehavior.Default
 	end
 end
 
+local function handleShiftLockKey()
+	if isTouchDevice then
+		return
+	end
+
+	local before = isShiftLockActive()
+	task.defer(function()
+		local after = isShiftLockActive()
+		if after == before then
+			setShiftLockState(not before)
+		else
+			shiftLockState = after
+		end
+	end)
+end
+
 local function shouldReplayDriveCamera()
 	-- On touch devices in physics mode, keep camera user-driven for natural control.
-	if playbackMode == "physics" and isTouchDevice and not frozen then
+	if (playbackMode == "physics" or playbackMode == "smooth") and isTouchDevice and not frozen then
 		return false
 	end
 	return true
@@ -246,7 +276,7 @@ local function applyPlaybackLock()
 		}
 	end
 
-	if playbackMode == "physics" and not frozen then
+	if playbackMode == "smooth" and not frozen then
 		hum.WalkSpeed = playbackState.saved.WalkSpeed
 		hum.JumpPower = playbackState.saved.JumpPower
 		hum.AutoRotate = true
@@ -371,6 +401,7 @@ local function normalizeFrame(rawFrame)
 			dt = math.max(dt, 1 / 1000),
 			root = rawFrame.root,
 			vel = rawFrame.vel or { 0, 0, 0 },
+			rotvel = rawFrame.rotvel or { 0, 0, 0 },
 			cam = rawFrame.cam,
 			cam_local = rawFrame.cam_local,
 			fov = tonumber(rawFrame.fov) or 70,
@@ -425,9 +456,10 @@ local function applyFrame(i)
 
 	setShiftLockState(frame.shiftlock == true)
 
-	if playbackMode == "ghost" or frozen then
+	if playbackMode == "ghost" or playbackMode == "physics" or frozen then
 		hrp.CFrame = rootCF
 		hrp.AssemblyLinearVelocity = tableToV3(frame.vel)
+		hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
 	else
 		local targetVel = tableToV3(frame.vel)
 		local posError = rootCF.Position - hrp.Position
@@ -436,8 +468,10 @@ local function applyFrame(i)
 		if dist > CONFIG.PHYSICS_SNAP_DISTANCE then
 			hrp.CFrame = rootCF
 			hrp.AssemblyLinearVelocity = targetVel
+			hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
 		else
 			hrp.AssemblyLinearVelocity = hrp.AssemblyLinearVelocity:Lerp(targetVel, CONFIG.PHYSICS_VELOCITY_BLEND)
+			hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
 
 			if dist > CONFIG.PHYSICS_SOFT_PULL_DISTANCE and dist > 0 then
 				local correctionVel = posError * CONFIG.PHYSICS_SOFT_CORRECTION_GAIN
@@ -453,7 +487,7 @@ local function applyFrame(i)
 		end
 	end
 	if shouldReplayDriveCamera() then
-		if playbackMode == "physics" and not frozen then
+		if (playbackMode == "physics" or playbackMode == "smooth") and not frozen then
 			local camLocalCF = tableToCf(frame.cam_local)
 			if camLocalCF then
 				camera.CFrame = hrp.CFrame * camLocalCF
@@ -596,12 +630,13 @@ local function captureFrame(dt)
 		dt = round(captureDt, 5),
 		root = roundArray(cfToTable(hrp.CFrame), CONFIG.ROUND_DIGITS),
 		vel = roundArray(v3ToTable(hrp.AssemblyLinearVelocity), CONFIG.ROUND_DIGITS),
+		rotvel = roundArray(v3ToTable(hrp.AssemblyAngularVelocity), CONFIG.ROUND_DIGITS),
 		cam = roundArray(cfToTable(camera.CFrame), CONFIG.ROUND_DIGITS),
 		-- Relative camera offset improves physics-mode camera/player alignment.
 		cam_local = roundArray(cfToTable(hrp.CFrame:ToObjectSpace(camera.CFrame)), CONFIG.ROUND_DIGITS),
 		fov = round(camera.FieldOfView, CONFIG.ROUND_DIGITS),
 		hstate = hum:GetState().Name,
-		shiftlock = shiftLockState,
+		shiftlock = isShiftLockActive(),
 		keys = keysSnapshot(),
 	}
 	table.insert(frames, frame)
@@ -708,6 +743,8 @@ local function startPlay()
 	clearRecordNoCollision()
 	setCameraPlaybackMode(true)
 	applyPlaybackLock()
+	applyFrame(playIndex)
+	playIndex = math.min(playIndex + 1, #frames + 1)
 	log("Playback started")
 end
 
@@ -727,7 +764,7 @@ end
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.8",
+		version = "0.8.2",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
@@ -789,7 +826,7 @@ local function commandHelp()
 	log("recorddt <fixed|realtime>")
 	log("playbackdt <fixed|recorded>")
 	log("recordnocollision <on|off>")
-	log("playbackmode <ghost|physics>")
+	log("playbackmode <ghost|physics|smooth>")
 	log("recordmode <replace|append>")
 	log("status")
 	log("clearlog")
@@ -880,8 +917,8 @@ local function runCommand(raw)
 
 	if cmd == "playbackmode" then
 		local newMode = string.lower(args[2] or "")
-		if newMode ~= "ghost" and newMode ~= "physics" then
-			log("Usage: playbackmode <ghost|physics>")
+		if newMode ~= "ghost" and newMode ~= "physics" and newMode ~= "smooth" then
+			log("Usage: playbackmode <ghost|physics|smooth>")
 			return
 		end
 		playbackMode = newMode
@@ -987,7 +1024,7 @@ UIS.InputBegan:Connect(function(input, gp)
 
 	local kc = input.KeyCode
 	if kc == Enum.KeyCode.LeftShift or kc == Enum.KeyCode.RightShift then
-		setShiftLockState(not shiftLockState)
+		handleShiftLockKey()
 	end
 
 	if kc == Enum.KeyCode.F8 then
@@ -1170,8 +1207,8 @@ end)
 
 shiftLockState = isShiftLockActive()
 
-log("Loaded v0.8.1. PlaceId: " .. tostring(game.PlaceId))
-log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics')")
+log("Loaded v0.8.2. PlaceId: " .. tostring(game.PlaceId))
+log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics|smooth')")
 log("Record dt mode: " .. (fixedRecordDt and "fixed" or "realtime") .. " (use 'recorddt fixed|realtime')")
 log("Playback dt mode: " .. (playbackUseRecordedDt and "recorded" or "fixed") .. " (use 'playbackdt fixed|recorded')")
 log("Record no-collision: " .. (recordNoCollisionEnabled and "on" or "off") .. " (use 'recordnocollision on|off')")
