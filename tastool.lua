@@ -1,5 +1,5 @@
 --[[
-TAS Lite v0.9.2 (Roblox, LocalScript/executor)
+TAS Lite v0.9.0 (Roblox, LocalScript/executor)
 - Stable record/playback timing
 - Fixed 60 FPS record/playback timeline
 - Virtual input playback (keyboard + mouse buttons)
@@ -9,8 +9,8 @@ TAS Lite v0.9.2 (Roblox, LocalScript/executor)
 - On-screen log + record freeze/trim indicators
 - Animated loading overlay + refreshed GUI
 - Settings panel toggle via `+` button
-- Playback mode: ghost (exact) or physics (with collisions)
-- Physics mode tuned for more human-like motion
+- Playback mode: ghost (exact), frameblend (teleport + smooth), smooth
+- Frameblend mode tuned for stable replay path following
 
 Hotkeys:
 F8  - start/stop record
@@ -39,9 +39,14 @@ local CONFIG = {
 	PLAYBACK_SPEED = 1, -- realtime multiplier
 	PLAYBACK_MAX_ACCUMULATOR = 0.35, -- seconds; drops excessive backlog to avoid slow-motion replay
 	PLAYBACK_MAX_STEPS_PER_RENDER = 24, -- max simulated replay steps per render frame
-	PLAYBACK_MODE = "physics", -- "ghost" | "physics" | "smooth"
+	PLAYBACK_MODE = "frameblend", -- "ghost" | "frameblend" | "smooth" (physics is alias of frameblend)
 	CAMERA_MODE = "smooth", -- "exact" | "smooth" for playback camera turns
 	PHYSICS_CAMERA_SMOOTH_RATE = 22, -- higher = snappier, lower = smoother
+	FRAMEBLEND_POSITION_ALPHA = 0.6, -- 0..1, higher = tighter path following
+	FRAMEBLEND_ROTATION_ALPHA = 0.5, -- 0..1, higher = tighter look/rotation following
+	FRAMEBLEND_SNAP_DISTANCE = 12, -- studs, hard snap if too far from target
+	FRAMEBLEND_VELOCITY_BLEND = 0.45, -- smoothing for linear velocity copy
+	FRAMEBLEND_ANGULAR_BLEND = 0.4, -- smoothing for angular velocity copy
 	PHYSICS_HARD_SNAP_DISTANCE = 36,
 	PHYSICS_SNAP_DISTANCE = 10,
 	PHYSICS_SOFT_PULL_DISTANCE = 1.25,
@@ -134,6 +139,8 @@ local QUICK_CP_NAME = "quick"
 local playbackSpeed = CONFIG.PLAYBACK_SPEED
 local playbackMode = CONFIG.PLAYBACK_MODE
 local cameraMode = CONFIG.CAMERA_MODE
+local frameBlendPositionAlpha = CONFIG.FRAMEBLEND_POSITION_ALPHA
+local frameBlendRotationAlpha = CONFIG.FRAMEBLEND_ROTATION_ALPHA
 local playbackAccumulator = 0
 local recordAccumulator = 0
 local lastPlaybackClock = 0
@@ -252,9 +259,26 @@ local function handleShiftLockKey()
 	end
 end
 
+local function isFrameBlendMode()
+	return playbackMode == "frameblend" or playbackMode == "physics"
+end
+
+local function normalizePlaybackModeValue(modeValue)
+	local m = string.lower(tostring(modeValue or ""))
+	if m == "physics" then
+		return "frameblend"
+	end
+	if m == "ghost" or m == "frameblend" or m == "smooth" then
+		return m
+	end
+	return "frameblend"
+end
+
+playbackMode = normalizePlaybackModeValue(playbackMode)
+
 local function shouldReplayDriveCamera()
-	-- On touch devices in physics mode, keep camera user-driven for natural control.
-	if (playbackMode == "physics" or playbackMode == "smooth") and isTouchDevice and not frozen then
+	-- On touch devices in frameblend/smooth mode, keep camera user-driven for natural control.
+	if (isFrameBlendMode() or playbackMode == "smooth") and isTouchDevice and not frozen then
 		return false
 	end
 	return true
@@ -677,10 +701,10 @@ local function applyPlaybackLock()
 		}
 	end
 
-	if (playbackMode == "smooth" or playbackMode == "physics") and not frozen then
+	if (playbackMode == "smooth" or isFrameBlendMode()) and not frozen then
 		hum.WalkSpeed = playbackState.saved.WalkSpeed
 		hum.JumpPower = playbackState.saved.JumpPower
-		hum.AutoRotate = (playbackMode ~= "physics")
+		hum.AutoRotate = (playbackMode == "smooth")
 	else
 		hum.WalkSpeed = 0
 		hum.JumpPower = 0
@@ -861,7 +885,7 @@ local function applyFrame(i)
 		return false
 	end
 
-	local shouldForceHumanoidState = (mode == "play") and ((playbackMode ~= "physics") or frozen)
+	local shouldForceHumanoidState = (mode == "play") and ((not isFrameBlendMode()) or frozen)
 	if shouldForceHumanoidState and type(frame.hstate) == "string" and frame.hstate ~= lastAppliedHumanoidState then
 		local stateEnum = Enum.HumanoidStateType[frame.hstate]
 		if stateEnum then
@@ -883,13 +907,30 @@ local function applyFrame(i)
 		hrp.AssemblyLinearVelocity = tableToV3(frame.vel)
 		hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
 		lastPhysicsJumpHeld = false
-	elseif playbackMode == "physics" then
+	elseif isFrameBlendMode() then
 		local targetVel = tableToV3(frame.vel)
 		lastPhysicsJumpHeld = false
-		-- Deterministic physics playback: follow recorded transform exactly to avoid drift/shake.
-		hrp.CFrame = rootCF
-		hrp.AssemblyLinearVelocity = targetVel
-		hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
+		local targetPos = rootCF.Position
+		local currentPos = hrp.Position
+		local deltaPos = targetPos - currentPos
+		local dist = deltaPos.Magnitude
+		local targetRot = rootCF - rootCF.Position
+
+		if dist >= CONFIG.FRAMEBLEND_SNAP_DISTANCE then
+			hrp.CFrame = rootCF
+		else
+			local posAlpha = math.clamp(frameBlendPositionAlpha, 0.05, 1)
+			local rotAlpha = math.clamp(frameBlendRotationAlpha, 0.05, 1)
+			local blendedPos = currentPos + (deltaPos * posAlpha)
+			local currentRot = hrp.CFrame - currentPos
+			local blendedRot = currentRot:Lerp(targetRot, rotAlpha)
+			hrp.CFrame = CFrame.new(blendedPos) * (blendedRot - blendedRot.Position)
+		end
+
+		local velAlpha = math.clamp(CONFIG.FRAMEBLEND_VELOCITY_BLEND, 0.05, 1)
+		local angAlpha = math.clamp(CONFIG.FRAMEBLEND_ANGULAR_BLEND, 0.05, 1)
+		hrp.AssemblyLinearVelocity = hrp.AssemblyLinearVelocity:Lerp(targetVel, velAlpha)
+		hrp.AssemblyAngularVelocity = hrp.AssemblyAngularVelocity:Lerp(tableToV3(frame.rotvel), angAlpha)
 	else
 		local targetVel = tableToV3(frame.vel)
 		local posError = rootCF.Position - hrp.Position
@@ -925,7 +966,7 @@ local function applyFrame(i)
 			else
 				camera.CFrame = camCF
 			end
-		elseif playbackMode == "physics" and not frozen then
+		elseif isFrameBlendMode() and not frozen then
 			local targetCamCF = camCF
 			if cameraMode == "exact" then
 				camera.CFrame = targetCamCF
@@ -938,7 +979,7 @@ local function applyFrame(i)
 	end
 	camera.FieldOfView = tonumber(frame.fov) or 70
 	if mode == "play" and not frozen then
-		if playbackMode == "physics" then
+		if isFrameBlendMode() then
 			releaseAllVirtualInputs()
 		else
 			syncVirtualInputsToFrame(frame)
@@ -1130,7 +1171,7 @@ local function statusText()
 	local recordFreezeText = (mode == "record" and frozen and "ON") or "OFF"
 	local shiftStateText = isShiftLockActive() and "ON" or "OFF"
 	return string.format(
-		"Mode: %s | Frozen: %s | RecFreeze: %s | ShiftLock: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | CameraMode: %s | TimelineFPS: %d | Inputs: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  T/Y Seek  C/V Checkpoint  / Command  U UI  F2 Hide",
+		"Mode: %s | Frozen: %s | RecFreeze: %s | ShiftLock: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | CameraMode: %s | BlendPos: %.2f | TimelineFPS: %d | Inputs: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  T/Y Seek  C/V Checkpoint  / Command  U UI  F2 Hide",
 		mode,
 		tostring(frozen),
 		recordFreezeText,
@@ -1141,6 +1182,7 @@ local function statusText()
 		recordMode,
 		playbackMode,
 		cameraMode,
+		frameBlendPositionAlpha,
 		CONFIG.TIMELINE_FPS,
 		virtualInputPlaybackEnabled and "ON" or "OFF",
 		seekSpeed,
@@ -1195,7 +1237,7 @@ titleLabel.TextColor3 = Color3.fromRGB(238, 245, 255)
 titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 titleLabel.Font = Enum.Font.GothamBold
 titleLabel.TextSize = 15
-titleLabel.Text = "TAS Tool  v0.9.2"
+titleLabel.Text = "TAS Tool  v0.9.0"
 titleLabel.Parent = topBar
 
 shiftLockIndicator = Instance.new("TextLabel")
@@ -1257,7 +1299,7 @@ commandBar.TextColor3 = Color3.fromRGB(238, 244, 255)
 commandBar.BorderSizePixel = 0
 commandBar.TextXAlignment = Enum.TextXAlignment.Left
 commandBar.Font = Enum.Font.Code
-commandBar.PlaceholderText = "help | selfcheck | inputs on/off | cameramode exact/smooth"
+commandBar.PlaceholderText = "help | playbackmode frameblend | blend 0.6 | cameramode exact/smooth"
 commandBar.TextSize = 15
 commandBar.ClearTextOnFocus = false
 commandBar.Text = ""
@@ -1611,13 +1653,13 @@ end
 local function cyclePlaybackMode()
 	local nextMode = playbackMode
 	if playbackMode == "ghost" then
-		nextMode = "physics"
-	elseif playbackMode == "physics" then
+		nextMode = "frameblend"
+	elseif isFrameBlendMode() then
 		nextMode = "smooth"
 	else
 		nextMode = "ghost"
 	end
-	playbackMode = nextMode
+	playbackMode = normalizePlaybackModeValue(nextMode)
 	if mode == "play" then
 		setCameraPlaybackMode(true)
 		resetCameraSmoothingClock()
@@ -1978,7 +2020,7 @@ end
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.9.2",
+		version = "0.9.0",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
@@ -2109,10 +2151,11 @@ local function commandHelp()
 	log("erase")
 	log("setspeed <number>")
 	log("playspeed <number>")
+	log("blend <0.05..1>")
 	log("inputs <on|off>")
 	log("overlay <on|off>")
 	log("recordnocollision <on|off>")
-	log("playbackmode <ghost|physics|smooth>")
+	log("playbackmode <ghost|frameblend|smooth>")
 	log("cameramode <exact|smooth>")
 	log("recordmode <replace|append>")
 	log("status")
@@ -2166,6 +2209,18 @@ local function runCommand(raw)
 		return
 	end
 
+	if cmd == "blend" then
+		local newBlend = tonumber(args[2])
+		if not newBlend then
+			log("Usage: blend <0.05..1>")
+			return
+		end
+		newBlend = math.clamp(newBlend, 0.05, 1)
+		frameBlendPositionAlpha = newBlend
+		log("Frameblend position alpha set to " .. string.format("%.2f", frameBlendPositionAlpha))
+		return
+	end
+
 	if cmd == "inputs" then
 		local modeArg = string.lower(args[2] or "")
 		if modeArg ~= "on" and modeArg ~= "off" then
@@ -2215,11 +2270,11 @@ local function runCommand(raw)
 
 	if cmd == "playbackmode" then
 		local newMode = string.lower(args[2] or "")
-		if newMode ~= "ghost" and newMode ~= "physics" and newMode ~= "smooth" then
-			log("Usage: playbackmode <ghost|physics|smooth>")
+		if newMode ~= "ghost" and newMode ~= "frameblend" and newMode ~= "physics" and newMode ~= "smooth" then
+			log("Usage: playbackmode <ghost|frameblend|smooth>")
 			return
 		end
-		playbackMode = newMode
+		playbackMode = normalizePlaybackModeValue(newMode)
 		if mode == "play" then
 			setCameraPlaybackMode(true)
 			resetCameraSmoothingClock()
@@ -2615,8 +2670,8 @@ end
 
 shiftLockState = isMouseLockCenter()
 
-log("Loaded v0.9.2. PlaceId: " .. tostring(game.PlaceId))
-log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics|smooth')")
+log("Loaded v0.9.0. PlaceId: " .. tostring(game.PlaceId))
+log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|frameblend|smooth')")
 log("Camera mode: " .. cameraMode .. " (use 'cameramode exact|smooth')")
 log("Timeline FPS locked: " .. tostring(CONFIG.TIMELINE_FPS))
 log("Virtual input playback: " .. (virtualInputPlaybackEnabled and "on" or "off") .. " (use 'inputs on|off')")
