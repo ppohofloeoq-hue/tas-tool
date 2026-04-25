@@ -214,27 +214,23 @@ local recordNoCollisionState = {
 	partTouch = {},
 }
 
-local function isShiftLockActive()
+local function isMouseLockCenter()
 	return UIS.MouseBehavior == Enum.MouseBehavior.LockCenter
 end
 
-local function callRobloxShiftLockToggle()
-	pcall(function()
-		ContextActionService:CallFunction("MouseLockSwitchAction", Enum.UserInputState.Begin, game)
-	end)
+local function isShiftLockActive()
+	return shiftLockState == true
 end
 
-local function setShiftLockState(enabled)
+local function setShiftLockState(enabled, forceApply)
 	shiftLockState = (enabled == true)
 	if isTouchDevice then
 		return
 	end
 
-	if isShiftLockActive() ~= shiftLockState then
-		callRobloxShiftLockToggle()
-	end
-	if isShiftLockActive() ~= shiftLockState then
-		UIS.MouseBehavior = shiftLockState and Enum.MouseBehavior.LockCenter or Enum.MouseBehavior.Default
+	local desired = shiftLockState and Enum.MouseBehavior.LockCenter or Enum.MouseBehavior.Default
+	if forceApply or UIS.MouseBehavior ~= desired then
+		UIS.MouseBehavior = desired
 	end
 end
 
@@ -243,13 +239,10 @@ local function handleShiftLockKey()
 		return
 	end
 
-	-- Let Roblox process native ShiftLock first, then just mirror real state.
-	task.delay(0.03, function()
-		shiftLockState = isShiftLockActive()
-		if updateUI then
-			updateUI()
-		end
-	end)
+	setShiftLockState(not shiftLockState, true)
+	if updateUI then
+		updateUI()
+	end
 end
 
 local function shouldReplayDriveCamera()
@@ -713,13 +706,11 @@ local function clearPlaybackLock()
 	end
 	if saved and saved.MouseBehavior then
 		UIS.MouseBehavior = saved.MouseBehavior
-		if (not isTouchDevice) and saved.MouseBehavior ~= Enum.MouseBehavior.LockCenter and isShiftLockActive() then
-			-- If Roblox left lock-center active, force one toggle back to unlocked state.
-			callRobloxShiftLockToggle()
-			UIS.MouseBehavior = saved.MouseBehavior
-		end
 	end
-	shiftLockState = isShiftLockActive()
+	shiftLockState = (saved and saved.ShiftLockState == true) or false
+	if not isTouchDevice then
+		setShiftLockState(shiftLockState, true)
+	end
 
 	playbackState.active = false
 	playbackState.humanoid = nil
@@ -863,7 +854,7 @@ local function applyFrame(i)
 		return false
 	end
 
-	local shouldForceHumanoidState = (playbackMode ~= "physics") or frozen
+	local shouldForceHumanoidState = (mode == "play") and ((playbackMode ~= "physics") or frozen)
 	if shouldForceHumanoidState and type(frame.hstate) == "string" and frame.hstate ~= lastAppliedHumanoidState then
 		local stateEnum = Enum.HumanoidStateType[frame.hstate]
 		if stateEnum then
@@ -874,7 +865,12 @@ local function applyFrame(i)
 		end
 	end
 
-	setShiftLockState(frame.shiftlock == true)
+	if mode == "play" then
+		local frameShiftLock = (frame.shiftlock == true)
+		if frameShiftLock ~= shiftLockState then
+			setShiftLockState(frameShiftLock, false)
+		end
+	end
 	local pressed = pressedMapFromFrame(frame)
 
 	if playbackMode == "ghost" or frozen then
@@ -909,15 +905,23 @@ local function applyFrame(i)
 			hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
 		else
 			local planarError = Vector3.new(posError.X, 0, posError.Z)
-			local planarCorrection = clampVectorMagnitude(
-				planarError * CONFIG.PHYSICS_SOFT_CORRECTION_GAIN,
-				CONFIG.PHYSICS_MAX_CORRECTION_SPEED
-			)
-			local verticalCorrection = math.clamp(
-				posError.Y * CONFIG.PHYSICS_VERTICAL_CORRECTION_GAIN,
-				-CONFIG.PHYSICS_MAX_VERTICAL_CORRECTION_SPEED,
-				CONFIG.PHYSICS_MAX_VERTICAL_CORRECTION_SPEED
-			)
+			local planarCorrection = Vector3.zero
+			local planarDist = planarError.Magnitude
+			if planarDist > CONFIG.PHYSICS_SOFT_PULL_DISTANCE then
+				planarCorrection = clampVectorMagnitude(
+					planarError * CONFIG.PHYSICS_SOFT_CORRECTION_GAIN,
+					CONFIG.PHYSICS_MAX_CORRECTION_SPEED
+				)
+			end
+
+			local verticalCorrection = 0
+			if math.abs(posError.Y) > 0.15 then
+				verticalCorrection = math.clamp(
+					posError.Y * CONFIG.PHYSICS_VERTICAL_CORRECTION_GAIN,
+					-CONFIG.PHYSICS_MAX_VERTICAL_CORRECTION_SPEED,
+					CONFIG.PHYSICS_MAX_VERTICAL_CORRECTION_SPEED
+				)
+			end
 			local desiredVel = targetVel + planarCorrection + Vector3.new(0, verticalCorrection, 0)
 			local velBlend = math.clamp(
 				CONFIG.PHYSICS_VELOCITY_BLEND + (dist * CONFIG.PHYSICS_DYNAMIC_BLEND_GAIN),
@@ -930,16 +934,22 @@ local function applyFrame(i)
 				CONFIG.PHYSICS_ANGULAR_BLEND
 			)
 
-			local targetRot = rootCF - rootCF.Position
+			local targetRot = nil
+			local targetForward = Vector3.new(rootCF.LookVector.X, 0, rootCF.LookVector.Z)
+			if targetForward.Magnitude > 0.0001 then
+				targetRot = CFrame.lookAt(Vector3.zero, targetForward.Unit)
+			end
 			local currentPos = hrp.Position
 			local currentRot = hrp.CFrame - currentPos
-			local orientBlend = math.clamp(
-				CONFIG.PHYSICS_ORIENTATION_BLEND + (dist * CONFIG.PHYSICS_ORIENTATION_DYNAMIC_GAIN),
-				CONFIG.PHYSICS_ORIENTATION_MIN_BLEND,
-				CONFIG.PHYSICS_ORIENTATION_MAX_BLEND
-			)
-			local blendedRot = currentRot:Lerp(targetRot, orientBlend)
-			hrp.CFrame = CFrame.new(currentPos) * (blendedRot - blendedRot.Position)
+			if targetRot then
+				local orientBlend = math.clamp(
+					CONFIG.PHYSICS_ORIENTATION_BLEND + (dist * CONFIG.PHYSICS_ORIENTATION_DYNAMIC_GAIN),
+					CONFIG.PHYSICS_ORIENTATION_MIN_BLEND,
+					CONFIG.PHYSICS_ORIENTATION_MAX_BLEND
+				)
+				local blendedRot = currentRot:Lerp(targetRot, orientBlend)
+				hrp.CFrame = CFrame.new(currentPos) * (blendedRot - blendedRot.Position)
+			end
 		end
 	else
 		local targetVel = tableToV3(frame.vel)
@@ -1001,7 +1011,9 @@ local function applyFrame(i)
 	elseif mode == "play" and frozen then
 		releaseAllVirtualInputs()
 	end
-	updatePlaybackInputOverlay(frame)
+	if mode == "play" then
+		updatePlaybackInputOverlay(frame)
+	end
 	return true
 end
 
