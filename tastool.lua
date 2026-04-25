@@ -1,10 +1,13 @@
 --[[
-TAS Lite v0.8.2 (Roblox, LocalScript/executor)
+TAS Lite v0.9.0 (Roblox, LocalScript/executor)
 - Stable record/playback timing
+- Fixed 60 FPS record/playback timeline
+- Virtual input playback (keyboard + mouse buttons)
 - Freeze/seek with safe frame indexing
 - Checkpoints + append recording mode
 - Save/load JSON (backward compatible with v0.1/v0.2 frames)
 - On-screen log + record freeze/trim indicators
+- Animated loading overlay + refreshed GUI
 - Playback mode: ghost (exact) or physics (with collisions)
 - Physics mode tuned for more human-like motion
 
@@ -26,12 +29,13 @@ Slash (/) - focus command bar
 
 local CONFIG = {
 	ROUND_DIGITS = 3,
+	TIMELINE_FPS = 60,
 	DEFAULT_FRAME_DT = 1 / 60,
-	FIXED_RECORD_DT = true, -- Ignore render lag while recording for stable playback speed.
+	VIRTUAL_INPUT_PLAYBACK = true,
 	RECORD_NO_COLLISION = false, -- Keep touch/collision triggers active while recording.
+	RECORD_MAX_STEPS_PER_RENDER = 12, -- cap catch-up work during lag spikes
 	SEEK_SPEED = 1, -- frames per render step while holding T/Y
 	PLAYBACK_SPEED = 1, -- realtime multiplier
-	PLAYBACK_USE_RECORDED_DT = false, -- false: replay speed ignores laggy recorded dt
 	PLAYBACK_MAX_ACCUMULATOR = 0.35, -- seconds; drops excessive backlog to avoid slow-motion replay
 	PLAYBACK_MAX_STEPS_PER_RENDER = 24, -- max simulated replay steps per render frame
 	PLAYBACK_MODE = "physics", -- "ghost" | "physics" | "smooth"
@@ -51,6 +55,8 @@ local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
 local ContextActionService = game:GetService("ContextActionService")
+local TweenService = game:GetService("TweenService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
@@ -72,13 +78,33 @@ local QUICK_CP_NAME = "quick"
 local playbackSpeed = CONFIG.PLAYBACK_SPEED
 local playbackMode = CONFIG.PLAYBACK_MODE
 local playbackAccumulator = 0
+local recordAccumulator = 0
 local lastTrimmedCount = 0
 local logLines = {}
 local logLabel
 local shiftLockState = false
-local fixedRecordDt = CONFIG.FIXED_RECORD_DT
-local playbackUseRecordedDt = CONFIG.PLAYBACK_USE_RECORDED_DT
+local mainFrame
+local timelineStep = 1 / CONFIG.TIMELINE_FPS
+local virtualInputPlaybackEnabled = CONFIG.VIRTUAL_INPUT_PLAYBACK
 local recordNoCollisionEnabled = CONFIG.RECORD_NO_COLLISION
+local virtualPressed = {}
+
+local VIRTUAL_INPUT_BLACKLIST = {
+	F2 = true,
+	F6 = true,
+	F7 = true,
+	F8 = true,
+	F10 = true,
+	U = true,
+	E = true,
+	F = true,
+	G = true,
+	T = true,
+	Y = true,
+	C = true,
+	V = true,
+	Slash = true,
+}
 
 local playbackState = {
 	active = false,
@@ -212,6 +238,123 @@ local function keysSnapshot()
 	end
 	table.sort(out)
 	return out
+end
+
+local function shouldCaptureVirtualKey(keyName)
+	return not VIRTUAL_INPUT_BLACKLIST[keyName]
+end
+
+local function keyNameToVirtualKeyCode(keyName)
+	if type(keyName) ~= "string" then
+		return nil
+	end
+	if #keyName == 1 then
+		local byte = string.byte(string.upper(keyName))
+		if byte and byte >= 65 and byte <= 90 then
+			return byte
+		end
+		if byte and byte >= 48 and byte <= 57 then
+			return byte
+		end
+	end
+
+	local map = {
+		Space = 0x20,
+		LeftShift = 0x10,
+		RightShift = 0x10,
+		LeftControl = 0x11,
+		RightControl = 0x11,
+		Tab = 0x09,
+		Enter = 0x0D,
+		Backspace = 0x08,
+		Up = 0x26,
+		Down = 0x28,
+		Left = 0x25,
+		Right = 0x27,
+	}
+	return map[keyName]
+end
+
+local function sendVirtualInputState(keyName, isDown)
+	if not virtualInputPlaybackEnabled then
+		return
+	end
+
+	if keyName == "MouseButton1" then
+		local mousePos = UIS:GetMouseLocation()
+		pcall(function()
+			VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, 0, isDown, game, 0)
+		end)
+		if isDown and mouse1press then
+			pcall(mouse1press)
+		elseif (not isDown) and mouse1release then
+			pcall(mouse1release)
+		end
+		return
+	end
+
+	if keyName == "MouseButton2" then
+		local mousePos = UIS:GetMouseLocation()
+		pcall(function()
+			VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, 1, isDown, game, 0)
+		end)
+		if isDown and mouse2press then
+			pcall(mouse2press)
+		elseif (not isDown) and mouse2release then
+			pcall(mouse2release)
+		end
+		return
+	end
+
+	local keyEnum = Enum.KeyCode[keyName]
+	if keyEnum then
+		pcall(function()
+			VirtualInputManager:SendKeyEvent(isDown, keyEnum, false, game)
+		end)
+	end
+
+	local vkey = keyNameToVirtualKeyCode(keyName)
+	if vkey then
+		if isDown and keypress then
+			pcall(keypress, vkey)
+		elseif (not isDown) and keyrelease then
+			pcall(keyrelease, vkey)
+		end
+	end
+end
+
+local function releaseAllVirtualInputs()
+	for keyName, isPressed in pairs(virtualPressed) do
+		if isPressed then
+			sendVirtualInputState(keyName, false)
+		end
+	end
+	virtualPressed = {}
+end
+
+local function syncVirtualInputsToFrame(frame)
+	if not virtualInputPlaybackEnabled then
+		return
+	end
+
+	local desired = {}
+	local keys = frame and frame.keys or {}
+	for _, keyName in ipairs(keys) do
+		if type(keyName) == "string" and shouldCaptureVirtualKey(keyName) then
+			desired[keyName] = true
+			if not virtualPressed[keyName] then
+				sendVirtualInputState(keyName, true)
+				virtualPressed[keyName] = true
+			end
+		end
+	end
+
+	for keyName, isPressed in pairs(virtualPressed) do
+		if isPressed and not desired[keyName] then
+			sendVirtualInputState(keyName, false)
+			virtualPressed[keyName] = nil
+		end
+	end
 end
 
 local function char()
@@ -499,13 +642,18 @@ local function applyFrame(i)
 		end
 	end
 	camera.FieldOfView = tonumber(frame.fov) or 70
+	if mode == "play" and not frozen then
+		syncVirtualInputsToFrame(frame)
+	elseif mode == "play" and frozen then
+		releaseAllVirtualInputs()
+	end
 	return true
 end
 
 local function statusText()
 	local recordFreezeText = (mode == "record" and frozen and "ON") or "OFF"
 	return string.format(
-		"Mode: %s | Frozen: %s | RecFreeze: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  T/Y Seek  C/V Checkpoint  / Command  U UI  F2 Hide",
+		"Mode: %s | Frozen: %s | RecFreeze: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | TimelineFPS: %d | Inputs: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  T/Y Seek  C/V Checkpoint  / Command  U UI  F2 Hide",
 		mode,
 		tostring(frozen),
 		recordFreezeText,
@@ -514,6 +662,8 @@ local function statusText()
 		lastTrimmedCount,
 		recordMode,
 		playbackMode,
+		CONFIG.TIMELINE_FPS,
+		virtualInputPlaybackEnabled and "ON" or "OFF",
 		seekSpeed,
 		playbackSpeed
 	)
@@ -524,47 +674,221 @@ local gui = Instance.new("ScreenGui")
 gui.Name = "TASLiteUI"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.fromOffset(780, 350)
+mainFrame.Position = UDim2.fromOffset(16, 12)
+mainFrame.BackgroundColor3 = Color3.fromRGB(18, 22, 30)
+mainFrame.BorderSizePixel = 0
+mainFrame.ClipsDescendants = true
+mainFrame.Parent = gui
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 8)
+mainCorner.Parent = mainFrame
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = Color3.fromRGB(70, 120, 205)
+mainStroke.Thickness = 1.5
+mainStroke.Transparency = 0.15
+mainStroke.Parent = mainFrame
+
+local topBar = Instance.new("Frame")
+topBar.Size = UDim2.new(1, 0, 0, 36)
+topBar.BackgroundColor3 = Color3.fromRGB(24, 33, 47)
+topBar.BorderSizePixel = 0
+topBar.Parent = mainFrame
+
+local topGrad = Instance.new("UIGradient")
+topGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(66, 112, 189)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(34, 57, 97)),
+})
+topGrad.Rotation = 12
+topGrad.Parent = topBar
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -12, 1, 0)
+titleLabel.Position = UDim2.fromOffset(10, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.TextColor3 = Color3.fromRGB(238, 245, 255)
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextSize = 15
+titleLabel.Text = "TAS Tool  v0.9.0"
+titleLabel.Parent = topBar
 
 local label = Instance.new("TextLabel")
-label.Size = UDim2.fromOffset(760, 120)
-label.Position = UDim2.fromOffset(12, 12)
-label.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-label.BackgroundTransparency = 0.25
-label.TextColor3 = Color3.fromRGB(255, 255, 255)
+label.Size = UDim2.new(1, -20, 0, 96)
+label.Position = UDim2.fromOffset(10, 44)
+label.BackgroundColor3 = Color3.fromRGB(14, 18, 26)
+label.BackgroundTransparency = 0.08
+label.BorderSizePixel = 0
+label.TextColor3 = Color3.fromRGB(224, 232, 247)
 label.TextXAlignment = Enum.TextXAlignment.Left
 label.TextYAlignment = Enum.TextYAlignment.Top
 label.Font = Enum.Font.Code
-label.TextSize = 16
+label.TextSize = 15
 label.Text = ""
-label.Parent = gui
+label.Parent = mainFrame
+
+local labelCorner = Instance.new("UICorner")
+labelCorner.CornerRadius = UDim.new(0, 6)
+labelCorner.Parent = label
 
 local commandBar = Instance.new("TextBox")
-commandBar.Size = UDim2.fromOffset(760, 30)
-commandBar.Position = UDim2.fromOffset(12, 138)
-commandBar.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-commandBar.BackgroundTransparency = 0.25
-commandBar.TextColor3 = Color3.fromRGB(255, 255, 255)
+commandBar.Size = UDim2.new(1, -20, 0, 30)
+commandBar.Position = UDim2.fromOffset(10, 148)
+commandBar.BackgroundColor3 = Color3.fromRGB(10, 13, 20)
+commandBar.BackgroundTransparency = 0.05
+commandBar.TextColor3 = Color3.fromRGB(232, 240, 255)
+commandBar.BorderSizePixel = 0
 commandBar.TextXAlignment = Enum.TextXAlignment.Left
 commandBar.Font = Enum.Font.Code
-commandBar.PlaceholderText = "help | erase | setspeed <n> | playspeed <n> | recordmode <replace|append> | cp ..."
-commandBar.TextSize = 16
+commandBar.PlaceholderText = "help | inputs on/off | playbackmode physics/ghost/smooth | recordnocollision on/off"
+commandBar.TextSize = 15
 commandBar.ClearTextOnFocus = false
 commandBar.Text = ""
-commandBar.Parent = gui
+commandBar.Parent = mainFrame
+
+local commandCorner = Instance.new("UICorner")
+commandCorner.CornerRadius = UDim.new(0, 6)
+commandCorner.Parent = commandBar
 
 logLabel = Instance.new("TextLabel")
-logLabel.Size = UDim2.fromOffset(760, 170)
-logLabel.Position = UDim2.fromOffset(12, 174)
-logLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-logLabel.BackgroundTransparency = 0.35
-logLabel.TextColor3 = Color3.fromRGB(175, 255, 175)
+logLabel.Size = UDim2.new(1, -20, 1, -188)
+logLabel.Position = UDim2.fromOffset(10, 186)
+logLabel.BackgroundColor3 = Color3.fromRGB(9, 12, 18)
+logLabel.BackgroundTransparency = 0.05
+logLabel.TextColor3 = Color3.fromRGB(177, 255, 205)
 logLabel.TextXAlignment = Enum.TextXAlignment.Left
 logLabel.TextYAlignment = Enum.TextYAlignment.Top
 logLabel.Font = Enum.Font.Code
-logLabel.TextSize = 14
+logLabel.TextSize = 13
+logLabel.BorderSizePixel = 0
 logLabel.TextWrapped = false
 logLabel.Text = ""
-logLabel.Parent = gui
+logLabel.Parent = mainFrame
+
+local logCorner = Instance.new("UICorner")
+logCorner.CornerRadius = UDim.new(0, 6)
+logCorner.Parent = logLabel
+
+local loadingOverlay = Instance.new("Frame")
+loadingOverlay.Size = UDim2.fromScale(1, 1)
+loadingOverlay.BackgroundColor3 = Color3.fromRGB(7, 10, 16)
+loadingOverlay.BackgroundTransparency = 0.08
+loadingOverlay.BorderSizePixel = 0
+loadingOverlay.ZIndex = 100
+loadingOverlay.Parent = gui
+
+local loadingPanel = Instance.new("Frame")
+loadingPanel.Size = UDim2.fromOffset(440, 150)
+loadingPanel.AnchorPoint = Vector2.new(0.5, 0.5)
+loadingPanel.Position = UDim2.fromScale(0.5, 0.5)
+loadingPanel.BackgroundColor3 = Color3.fromRGB(17, 24, 36)
+loadingPanel.BorderSizePixel = 0
+loadingPanel.ZIndex = 101
+loadingPanel.Parent = loadingOverlay
+
+local loadCorner = Instance.new("UICorner")
+loadCorner.CornerRadius = UDim.new(0, 8)
+loadCorner.Parent = loadingPanel
+
+local loadStroke = Instance.new("UIStroke")
+loadStroke.Color = Color3.fromRGB(74, 130, 220)
+loadStroke.Thickness = 1.5
+loadStroke.Parent = loadingPanel
+
+local loadTitle = Instance.new("TextLabel")
+loadTitle.Size = UDim2.new(1, -24, 0, 38)
+loadTitle.Position = UDim2.fromOffset(12, 10)
+loadTitle.BackgroundTransparency = 1
+loadTitle.Text = "Initializing TAS Tool"
+loadTitle.TextColor3 = Color3.fromRGB(230, 238, 255)
+loadTitle.Font = Enum.Font.GothamBold
+loadTitle.TextSize = 20
+loadTitle.TextXAlignment = Enum.TextXAlignment.Left
+loadTitle.ZIndex = 101
+loadTitle.Parent = loadingPanel
+
+local loadHint = Instance.new("TextLabel")
+loadHint.Size = UDim2.new(1, -24, 0, 22)
+loadHint.Position = UDim2.fromOffset(12, 52)
+loadHint.BackgroundTransparency = 1
+loadHint.Text = "Preparing timeline..."
+loadHint.TextColor3 = Color3.fromRGB(165, 187, 227)
+loadHint.Font = Enum.Font.Gotham
+loadHint.TextSize = 14
+loadHint.TextXAlignment = Enum.TextXAlignment.Left
+loadHint.ZIndex = 101
+loadHint.Parent = loadingPanel
+
+local loadTrack = Instance.new("Frame")
+loadTrack.Size = UDim2.new(1, -24, 0, 14)
+loadTrack.Position = UDim2.fromOffset(12, 94)
+loadTrack.BackgroundColor3 = Color3.fromRGB(35, 44, 59)
+loadTrack.BorderSizePixel = 0
+loadTrack.ZIndex = 101
+loadTrack.Parent = loadingPanel
+
+local loadTrackCorner = Instance.new("UICorner")
+loadTrackCorner.CornerRadius = UDim.new(0, 7)
+loadTrackCorner.Parent = loadTrack
+
+local loadFill = Instance.new("Frame")
+loadFill.Size = UDim2.fromScale(0, 1)
+loadFill.BackgroundColor3 = Color3.fromRGB(105, 203, 255)
+loadFill.BorderSizePixel = 0
+loadFill.ZIndex = 102
+loadFill.Parent = loadTrack
+
+local loadFillCorner = Instance.new("UICorner")
+loadFillCorner.CornerRadius = UDim.new(0, 7)
+loadFillCorner.Parent = loadFill
+
+local function playIntroAnimation()
+	mainFrame.Position = UDim2.fromOffset(16, -360)
+	mainFrame.BackgroundTransparency = 0.35
+	local hints = {
+		"Preparing timeline...",
+		"Configuring playback core...",
+		"Syncing interface...",
+		"Almost ready...",
+	}
+
+	task.spawn(function()
+		for idx, text in ipairs(hints) do
+			loadHint.Text = text
+			task.wait(0.24 + (idx * 0.02))
+		end
+	end)
+
+	local fillTween = TweenService:Create(
+		loadFill,
+		TweenInfo.new(1.05, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ Size = UDim2.fromScale(1, 1) }
+	)
+	fillTween:Play()
+	fillTween.Completed:Wait()
+
+	local panelTween = TweenService:Create(
+		mainFrame,
+		TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{ Position = UDim2.fromOffset(16, 12), BackgroundTransparency = 0 }
+	)
+	panelTween:Play()
+
+	local overlayFade = TweenService:Create(
+		loadingOverlay,
+		TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ BackgroundTransparency = 1 }
+	)
+	overlayFade:Play()
+	overlayFade.Completed:Wait()
+	loadingOverlay:Destroy()
+end
 
 local function getUIParent()
 	if gethui then
@@ -577,6 +901,7 @@ local function getUIParent()
 end
 
 gui.Parent = getUIParent()
+playIntroAnimation()
 
 local function updateUI()
 	label.Text = statusText()
@@ -618,16 +943,14 @@ local function gotoCheckpoint(name)
 	return true
 end
 
-local function captureFrame(dt)
+local function captureFrame(captureDt)
 	local hum, hrp = humanoidAndRoot()
 	if not hrp or not hum then
 		return
 	end
 
-	local captureDt = fixedRecordDt and CONFIG.DEFAULT_FRAME_DT or math.max(1 / 1000, dt or CONFIG.DEFAULT_FRAME_DT)
-
 	local frame = {
-		dt = round(captureDt, 5),
+		dt = round(math.max(1 / 1000, captureDt or timelineStep), 5),
 		root = roundArray(cfToTable(hrp.CFrame), CONFIG.ROUND_DIGITS),
 		vel = roundArray(v3ToTable(hrp.AssemblyLinearVelocity), CONFIG.ROUND_DIGITS),
 		rotvel = roundArray(v3ToTable(hrp.AssemblyAngularVelocity), CONFIG.ROUND_DIGITS),
@@ -699,6 +1022,8 @@ local function startRecord()
 	setFrozen(false)
 	seekDir = 0
 	playbackAccumulator = 0
+	recordAccumulator = 0
+	releaseAllVirtualInputs()
 	clearPlaybackLock()
 	clearRecordFreezeLock()
 	clearRecordNoCollision()
@@ -725,6 +1050,7 @@ local function stopRecord()
 	setFrozen(false)
 	clearRecordFreezeLock()
 	clearRecordNoCollision()
+	recordAccumulator = 0
 	mode = "idle"
 	log("Recording stopped. Frames: " .. tostring(#frames))
 end
@@ -740,6 +1066,8 @@ local function startPlay()
 	playIndex = 1
 	lastTrimmedCount = 0
 	playbackAccumulator = 0
+	recordAccumulator = 0
+	releaseAllVirtualInputs()
 	clearRecordNoCollision()
 	setCameraPlaybackMode(true)
 	applyPlaybackLock()
@@ -756,6 +1084,8 @@ local function stopPlay()
 	setFrozen(false)
 	seekDir = 0
 	playbackAccumulator = 0
+	recordAccumulator = 0
+	releaseAllVirtualInputs()
 	clearPlaybackLock()
 	setCameraPlaybackMode(false)
 	log("Playback stopped")
@@ -764,7 +1094,7 @@ end
 local function saveReplay()
 	ensureFolder()
 	local payload = {
-		version = "0.8.2",
+		version = "0.9.0",
 		placeId = game.PlaceId,
 		savedAtUnix = os.time(),
 		frames = frames,
@@ -823,8 +1153,7 @@ local function commandHelp()
 	log("erase")
 	log("setspeed <number>")
 	log("playspeed <number>")
-	log("recorddt <fixed|realtime>")
-	log("playbackdt <fixed|recorded>")
+	log("inputs <on|off>")
 	log("recordnocollision <on|off>")
 	log("playbackmode <ghost|physics|smooth>")
 	log("recordmode <replace|append>")
@@ -877,25 +1206,17 @@ local function runCommand(raw)
 		return
 	end
 
-	if cmd == "recorddt" then
+	if cmd == "inputs" then
 		local modeArg = string.lower(args[2] or "")
-		if modeArg ~= "fixed" and modeArg ~= "realtime" then
-			log("Usage: recorddt <fixed|realtime>")
+		if modeArg ~= "on" and modeArg ~= "off" then
+			log("Usage: inputs <on|off>")
 			return
 		end
-		fixedRecordDt = (modeArg == "fixed")
-		log("Record dt mode set to " .. modeArg)
-		return
-	end
-
-	if cmd == "playbackdt" then
-		local modeArg = string.lower(args[2] or "")
-		if modeArg ~= "fixed" and modeArg ~= "recorded" then
-			log("Usage: playbackdt <fixed|recorded>")
-			return
+		virtualInputPlaybackEnabled = (modeArg == "on")
+		if not virtualInputPlaybackEnabled then
+			releaseAllVirtualInputs()
 		end
-		playbackUseRecordedDt = (modeArg == "recorded")
-		log("Playback dt mode set to " .. modeArg)
+		log("Virtual input playback set to " .. modeArg)
 		return
 	end
 
@@ -995,7 +1316,14 @@ end
 
 UIS.InputBegan:Connect(function(input, gp)
 	if input.UserInputType == Enum.UserInputType.Keyboard then
-		heldKeys[input.KeyCode.Name] = true
+		local keyName = input.KeyCode.Name
+		if shouldCaptureVirtualKey(keyName) then
+			heldKeys[keyName] = true
+		end
+	elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+		heldKeys.MouseButton1 = true
+	elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+		heldKeys.MouseButton2 = true
 	end
 
 	if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.F2 then
@@ -1012,6 +1340,9 @@ UIS.InputBegan:Connect(function(input, gp)
 	end
 
 	if UIS:GetFocusedTextBox() then
+		if input.UserInputType == Enum.UserInputType.Keyboard then
+			heldKeys[input.KeyCode.Name] = nil
+		end
 		updateUI()
 		return
 	end
@@ -1085,6 +1416,10 @@ end)
 UIS.InputEnded:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.Keyboard then
 		heldKeys[input.KeyCode.Name] = nil
+	elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+		heldKeys.MouseButton1 = nil
+	elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+		heldKeys.MouseButton2 = nil
 	end
 
 	if input.KeyCode == Enum.KeyCode.T and seekDir == -1 then
@@ -1117,7 +1452,17 @@ RunService.RenderStepped:Connect(function(dt)
 			end
 		else
 			clearRecordFreezeLock()
-			captureFrame(dt)
+			recordAccumulator = recordAccumulator + dt
+			if recordAccumulator > CONFIG.PLAYBACK_MAX_ACCUMULATOR then
+				recordAccumulator = CONFIG.PLAYBACK_MAX_ACCUMULATOR
+			end
+
+			local recordSteps = 0
+			while recordAccumulator >= timelineStep and recordSteps < CONFIG.RECORD_MAX_STEPS_PER_RENDER do
+				captureFrame(timelineStep)
+				recordAccumulator = recordAccumulator - timelineStep
+				recordSteps = recordSteps + 1
+			end
 		end
 	elseif mode == "play" then
 		if #frames == 0 then
@@ -1152,10 +1497,7 @@ RunService.RenderStepped:Connect(function(dt)
 					stopPlay()
 					break
 				end
-				local frameDt = playbackUseRecordedDt
-					and math.max(tonumber(frame.dt) or CONFIG.DEFAULT_FRAME_DT, 1 / 1000)
-					or CONFIG.DEFAULT_FRAME_DT
-				if playbackAccumulator < frameDt then
+				if playbackAccumulator < timelineStep then
 					break
 				end
 
@@ -1166,7 +1508,7 @@ RunService.RenderStepped:Connect(function(dt)
 				end
 				appliedAny = true
 
-				playbackAccumulator = playbackAccumulator - frameDt
+				playbackAccumulator = playbackAccumulator - timelineStep
 				playIndex = playIndex + 1
 				steps = steps + 1
 				if playIndex > #frames then
@@ -1177,11 +1519,10 @@ RunService.RenderStepped:Connect(function(dt)
 
 			-- If we had a large lag spike, skip excess backlog to keep real-time speed.
 			if mode == "play" and steps >= CONFIG.PLAYBACK_MAX_STEPS_PER_RENDER and playbackAccumulator > 0 then
-				local skipDt = playbackUseRecordedDt and CONFIG.DEFAULT_FRAME_DT or CONFIG.DEFAULT_FRAME_DT
-				local extraSkip = math.floor(playbackAccumulator / skipDt)
+				local extraSkip = math.floor(playbackAccumulator / timelineStep)
 				if extraSkip > 0 then
 					playIndex = math.min(playIndex + extraSkip, #frames + 1)
-					playbackAccumulator = playbackAccumulator - (extraSkip * skipDt)
+					playbackAccumulator = playbackAccumulator - (extraSkip * timelineStep)
 				end
 			end
 
@@ -1207,10 +1548,10 @@ end)
 
 shiftLockState = isShiftLockActive()
 
-log("Loaded v0.8.2. PlaceId: " .. tostring(game.PlaceId))
+log("Loaded v0.9.0. PlaceId: " .. tostring(game.PlaceId))
 log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics|smooth')")
-log("Record dt mode: " .. (fixedRecordDt and "fixed" or "realtime") .. " (use 'recorddt fixed|realtime')")
-log("Playback dt mode: " .. (playbackUseRecordedDt and "recorded" or "fixed") .. " (use 'playbackdt fixed|recorded')")
+log("Timeline FPS locked: " .. tostring(CONFIG.TIMELINE_FPS))
+log("Virtual input playback: " .. (virtualInputPlaybackEnabled and "on" or "off") .. " (use 'inputs on|off')")
 log("Record no-collision: " .. (recordNoCollisionEnabled and "on" or "off") .. " (use 'recordnocollision on|off')")
 log("Playback hotkey moved to F10")
 log("Press F2 to force hide/show GUI")
