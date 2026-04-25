@@ -46,8 +46,14 @@ local CONFIG = {
 	PHYSICS_SNAP_DISTANCE = 10,
 	PHYSICS_SOFT_PULL_DISTANCE = 1.25,
 	PHYSICS_SOFT_CORRECTION_GAIN = 7.0,
+	PHYSICS_VERTICAL_CORRECTION_GAIN = 3.0,
 	PHYSICS_MAX_CORRECTION_SPEED = 26,
+	PHYSICS_MAX_VERTICAL_CORRECTION_SPEED = 14,
 	PHYSICS_VELOCITY_BLEND = 0.55,
+	PHYSICS_DYNAMIC_BLEND_GAIN = 0.02,
+	PHYSICS_MIN_BLEND = 0.35,
+	PHYSICS_MAX_BLEND = 0.95,
+	PHYSICS_ANGULAR_BLEND = 0.35,
 	PHYSICS_CORRECTION_BLEND = 0.35,
 	OVERLAY_MOUSE_RADIUS = 58,
 	OVERLAY_MOUSE_SENSITIVITY = 420,
@@ -172,6 +178,8 @@ local overlayMouseState = {
 local cameraSmoothState = {
 	lastUpdate = 0,
 }
+local lastAppliedHumanoidState = nil
+local lastPhysicsJumpHeld = false
 
 local VIRTUAL_INPUT_BLACKLIST = {
 	F2 = true,
@@ -426,6 +434,23 @@ local function movementFromPressedMap(pressed, rootCF)
 
 	local rootRot = rootCF - rootCF.Position
 	return rootRot:VectorToWorldSpace(localMove)
+end
+
+local function movementFromVelocity(vel)
+	local planar = Vector3.new(vel.X, 0, vel.Z)
+	local mag = planar.Magnitude
+	if mag <= 0.05 then
+		return Vector3.zero
+	end
+	return planar / mag
+end
+
+local function clampVectorMagnitude(v, maxMagnitude)
+	local mag = v.Magnitude
+	if mag <= maxMagnitude or mag <= 0 then
+		return v
+	end
+	return v.Unit * maxMagnitude
 end
 
 local function keysSnapshot()
@@ -821,12 +846,14 @@ local function applyFrame(i)
 		return false
 	end
 
-	if type(frame.hstate) == "string" then
+	local shouldForceHumanoidState = (playbackMode ~= "physics") or frozen
+	if shouldForceHumanoidState and type(frame.hstate) == "string" and frame.hstate ~= lastAppliedHumanoidState then
 		local stateEnum = Enum.HumanoidStateType[frame.hstate]
 		if stateEnum then
 			pcall(function()
 				hum:ChangeState(stateEnum)
 			end)
+			lastAppliedHumanoidState = frame.hstate
 		end
 	end
 
@@ -837,36 +864,60 @@ local function applyFrame(i)
 		hrp.CFrame = rootCF
 		hrp.AssemblyLinearVelocity = tableToV3(frame.vel)
 		hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
+		lastPhysicsJumpHeld = false
 	elseif playbackMode == "physics" then
 		local targetVel = tableToV3(frame.vel)
 		local posError = rootCF.Position - hrp.Position
 		local dist = posError.Magnitude
 		local moveDir = movementFromPressedMap(pressed, rootCF)
+		if moveDir.Magnitude <= 0 then
+			moveDir = movementFromVelocity(targetVel)
+		end
 
-		hum:Move(moveDir, false)
-		if pressed.Space or pressed.Up then
+		if moveDir.Magnitude > 0 then
+			hum:Move(moveDir, false)
+		else
+			hum:Move(Vector3.zero, false)
+		end
+
+		local jumpHeld = (pressed.Space or pressed.Up) == true
+		if jumpHeld and not lastPhysicsJumpHeld then
 			hum.Jump = true
 		end
+		lastPhysicsJumpHeld = jumpHeld
 
 		if dist > CONFIG.PHYSICS_HARD_SNAP_DISTANCE then
 			hrp.CFrame = rootCF
 			hrp.AssemblyLinearVelocity = targetVel
 			hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
 		else
-			local correctionVel = posError * CONFIG.PHYSICS_SOFT_CORRECTION_GAIN
-			local correctionMag = correctionVel.Magnitude
-			if correctionMag > CONFIG.PHYSICS_MAX_CORRECTION_SPEED and correctionMag > 0 then
-				correctionVel = correctionVel.Unit * CONFIG.PHYSICS_MAX_CORRECTION_SPEED
-			end
-
-			local desiredVel = targetVel + correctionVel
-			hrp.AssemblyLinearVelocity = hrp.AssemblyLinearVelocity:Lerp(desiredVel, CONFIG.PHYSICS_VELOCITY_BLEND)
-			hrp.AssemblyAngularVelocity = tableToV3(frame.rotvel)
+			local planarError = Vector3.new(posError.X, 0, posError.Z)
+			local planarCorrection = clampVectorMagnitude(
+				planarError * CONFIG.PHYSICS_SOFT_CORRECTION_GAIN,
+				CONFIG.PHYSICS_MAX_CORRECTION_SPEED
+			)
+			local verticalCorrection = math.clamp(
+				posError.Y * CONFIG.PHYSICS_VERTICAL_CORRECTION_GAIN,
+				-CONFIG.PHYSICS_MAX_VERTICAL_CORRECTION_SPEED,
+				CONFIG.PHYSICS_MAX_VERTICAL_CORRECTION_SPEED
+			)
+			local desiredVel = targetVel + planarCorrection + Vector3.new(0, verticalCorrection, 0)
+			local velBlend = math.clamp(
+				CONFIG.PHYSICS_VELOCITY_BLEND + (dist * CONFIG.PHYSICS_DYNAMIC_BLEND_GAIN),
+				CONFIG.PHYSICS_MIN_BLEND,
+				CONFIG.PHYSICS_MAX_BLEND
+			)
+			hrp.AssemblyLinearVelocity = hrp.AssemblyLinearVelocity:Lerp(desiredVel, velBlend)
+			hrp.AssemblyAngularVelocity = hrp.AssemblyAngularVelocity:Lerp(
+				tableToV3(frame.rotvel),
+				CONFIG.PHYSICS_ANGULAR_BLEND
+			)
 		end
 	else
 		local targetVel = tableToV3(frame.vel)
 		local posError = rootCF.Position - hrp.Position
 		local dist = posError.Magnitude
+		lastPhysicsJumpHeld = false
 
 		if dist > CONFIG.PHYSICS_SNAP_DISTANCE then
 			hrp.CFrame = rootCF
@@ -1226,7 +1277,7 @@ commandBar.TextColor3 = Color3.fromRGB(232, 240, 255)
 commandBar.BorderSizePixel = 0
 commandBar.TextXAlignment = Enum.TextXAlignment.Left
 commandBar.Font = Enum.Font.Code
-commandBar.PlaceholderText = "help | inputs on/off | cameramode exact/smooth | playbackmode physics/ghost/smooth"
+commandBar.PlaceholderText = "help | selfcheck | inputs on/off | cameramode exact/smooth"
 commandBar.TextSize = 15
 commandBar.ClearTextOnFocus = false
 commandBar.Text = ""
@@ -1845,7 +1896,7 @@ local function startRecord()
 	setFrozen(false)
 	seekDir = 0
 	playbackAccumulator = 0
-	recordAccumulator = 0
+	recordAccumulator = timelineStep
 	lastRecordClock = tick()
 	lastPlaybackClock = 0
 	releaseAllVirtualInputs()
@@ -1857,6 +1908,8 @@ local function startRecord()
 	applyRecordNoCollision()
 	shiftLockState = isShiftLockActive()
 	lastRecordedShiftLockState = shiftLockState
+	lastAppliedHumanoidState = nil
+	lastPhysicsJumpHeld = false
 
 	if recordMode == "replace" then
 		frames = {}
@@ -1880,6 +1933,8 @@ local function stopRecord()
 	recordAccumulator = 0
 	lastRecordClock = 0
 	lastRecordedShiftLockState = nil
+	lastAppliedHumanoidState = nil
+	lastPhysicsJumpHeld = false
 	updatePlaybackInputOverlay(nil)
 	mode = "idle"
 	log("Recording stopped. Frames: " .. tostring(#frames))
@@ -1895,18 +1950,24 @@ local function startPlay()
 	seekDir = 0
 	playIndex = 1
 	lastTrimmedCount = 0
-	playbackAccumulator = 0
+	playbackAccumulator = timelineStep
 	recordAccumulator = 0
 	lastPlaybackClock = tick()
 	lastRecordClock = 0
+	lastAppliedHumanoidState = nil
+	lastPhysicsJumpHeld = false
 	releaseAllVirtualInputs()
 	updatePlaybackInputOverlay(nil)
 	clearRecordNoCollision()
 	setCameraPlaybackMode(true)
 	resetCameraSmoothingClock()
 	applyPlaybackLock()
-	applyFrame(playIndex)
-	playIndex = math.min(playIndex + 1, #frames + 1)
+	local warmupApplied = applyFrame(playIndex)
+	if warmupApplied then
+		playIndex = math.min(playIndex + 1, #frames + 1)
+	else
+		playIndex = 1
+	end
 	log("Playback started")
 end
 
@@ -1921,6 +1982,8 @@ local function stopPlay()
 	recordAccumulator = 0
 	lastPlaybackClock = 0
 	lastRecordClock = 0
+	lastAppliedHumanoidState = nil
+	lastPhysicsJumpHeld = false
 	releaseAllVirtualInputs()
 	updatePlaybackInputOverlay(nil)
 	clearPlaybackLock()
@@ -1973,6 +2036,8 @@ local function loadReplay()
 	checkpoints = loadedCheckpoints
 	playIndex = 1
 	lastTrimmedCount = 0
+	lastAppliedHumanoidState = nil
+	lastPhysicsJumpHeld = false
 	log("Loaded replay. Frames: " .. tostring(#frames))
 	if droppedFrames > 0 then
 		log("Dropped invalid frames: " .. tostring(droppedFrames))
@@ -1990,12 +2055,69 @@ local function eraseReplay()
 	seekDir = 0
 	mode = "idle"
 	playbackAccumulator = 0
+	lastAppliedHumanoidState = nil
+	lastPhysicsJumpHeld = false
 	clearPlaybackLock()
 	clearRecordFreezeLock()
 	clearRecordNoCollision()
 	setCameraPlaybackMode(false)
 	saveReplay()
 	log("Replay erased")
+end
+
+local function runSelfCheck()
+	local frameCount = #frames
+	if frameCount == 0 then
+		log("Selfcheck: no frames loaded/recorded")
+		return
+	end
+
+	local badRoot = 0
+	local badCam = 0
+	local badVel = 0
+	local badRotVel = 0
+	local badDt = 0
+	local badFov = 0
+	local badKeys = 0
+	for _, frame in ipairs(frames) do
+		if not tableToCf(frame.root) then
+			badRoot = badRoot + 1
+		end
+		if not tableToCf(frame.cam) then
+			badCam = badCam + 1
+		end
+		if type(frame.vel) ~= "table" or #frame.vel < 3 then
+			badVel = badVel + 1
+		end
+		if type(frame.rotvel) ~= "table" or #frame.rotvel < 3 then
+			badRotVel = badRotVel + 1
+		end
+		local dt = tonumber(frame.dt)
+		if (not isFiniteNumber(dt)) or dt <= 0 or dt > 1 then
+			badDt = badDt + 1
+		end
+		local fov = tonumber(frame.fov)
+		if (not isFiniteNumber(fov)) or fov < 1 or fov > 120 then
+			badFov = badFov + 1
+		end
+		if type(frame.keys) ~= "table" then
+			badKeys = badKeys + 1
+		end
+	end
+
+	local _, droppedCheckpoints = sanitizeCheckpoints(checkpoints, frameCount)
+	log(string.format(
+		"Selfcheck: frames=%d | badRoot=%d badCam=%d badVel=%d badRotVel=%d badDt=%d badFov=%d badKeys=%d badCp=%d",
+		frameCount,
+		badRoot,
+		badCam,
+		badVel,
+		badRotVel,
+		badDt,
+		badFov,
+		badKeys,
+		droppedCheckpoints
+	))
 end
 
 local function commandHelp()
@@ -2011,6 +2133,7 @@ local function commandHelp()
 	log("cameramode <exact|smooth>")
 	log("recordmode <replace|append>")
 	log("status")
+	log("selfcheck")
 	log("clearlog")
 	log("cp set <name> [frame]")
 	log("cp goto <name>")
@@ -2153,6 +2276,11 @@ local function runCommand(raw)
 
 	if cmd == "status" then
 		log(statusText())
+		return
+	end
+
+	if cmd == "selfcheck" then
+		runSelfCheck()
 		return
 	end
 
