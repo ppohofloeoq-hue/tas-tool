@@ -40,6 +40,7 @@ local CONFIG = {
 	PLAYBACK_MAX_ACCUMULATOR = 0.35, -- seconds; drops excessive backlog to avoid slow-motion replay
 	PLAYBACK_MAX_STEPS_PER_RENDER = 24, -- max simulated replay steps per render frame
 	PLAYBACK_MODE = "physics", -- "ghost" | "physics" | "smooth"
+	CAMERA_MODE = "smooth", -- "exact" | "smooth" for playback camera turns
 	PHYSICS_CAMERA_SMOOTH_RATE = 22, -- higher = snappier, lower = smoother
 	PHYSICS_SNAP_DISTANCE = 10,
 	PHYSICS_SOFT_PULL_DISTANCE = 1.25,
@@ -86,6 +87,7 @@ local QUICK_CP_NAME = "quick"
 
 local playbackSpeed = CONFIG.PLAYBACK_SPEED
 local playbackMode = CONFIG.PLAYBACK_MODE
+local cameraMode = CONFIG.CAMERA_MODE
 local playbackAccumulator = 0
 local recordAccumulator = 0
 local lastPlaybackClock = 0
@@ -107,6 +109,7 @@ local settingsRecordNoColBtn
 local settingsRecordModeBtn
 local settingsPlaySpeedBtn
 local settingsOverlayBtn
+local settingsCameraModeBtn
 local inputOverlayFrame
 local inputOverlayLabel
 local shiftLockIndicator
@@ -190,14 +193,10 @@ local function handleShiftLockKey()
 		return
 	end
 
-	local before = isShiftLockActive()
-	task.defer(function()
-		local after = isShiftLockActive()
-		if after == before then
-			setShiftLockState(not before)
-		else
-			shiftLockState = after
-		end
+	-- Let Roblox process native ShiftLock first, then just mirror real state.
+	task.delay(0.03, function()
+		shiftLockState = isShiftLockActive()
+		updateUI()
 	end)
 end
 
@@ -513,21 +512,10 @@ local function clearPlaybackLock()
 	if hrp and hrp.Parent and saved then
 		hrp.Anchored = saved.Anchored
 	end
-	shiftLockState = (saved and saved.ShiftLockState == true) or false
-	if not isTouchDevice then
-		if saved and saved.ShiftLockState == true then
-			setShiftLockState(true)
-		else
-			-- Force unlock in case Roblox leaves lock-center active after scripted playback.
-			UIS.MouseBehavior = Enum.MouseBehavior.Default
-			if isShiftLockActive() then
-				callRobloxShiftLockToggle()
-				UIS.MouseBehavior = Enum.MouseBehavior.Default
-			end
-		end
-	elseif saved and saved.MouseBehavior then
+	if saved and saved.MouseBehavior then
 		UIS.MouseBehavior = saved.MouseBehavior
 	end
+	shiftLockState = isShiftLockActive()
 
 	playbackState.active = false
 	playbackState.humanoid = nil
@@ -709,8 +697,11 @@ local function applyFrame(i)
 				camera.CFrame = camCF
 			end
 		elseif playbackMode == "physics" and not frozen then
-			-- Physics mode uses smoothed recorded world camera to reduce visible jitter.
-			smoothCameraTo(camCF)
+			if cameraMode == "exact" then
+				camera.CFrame = camCF
+			else
+				smoothCameraTo(camCF)
+			end
 		else
 			camera.CFrame = camCF
 		end
@@ -864,6 +855,9 @@ local function refreshSettingsUI()
 	if settingsPlaybackModeBtn then
 		settingsPlaybackModeBtn.Text = "Playback: " .. tostring(playbackMode)
 	end
+	if settingsCameraModeBtn then
+		settingsCameraModeBtn.Text = "Camera: " .. tostring(cameraMode)
+	end
 	if settingsRecordNoColBtn then
 		settingsRecordNoColBtn.Text = "RecNoCol: " .. (recordNoCollisionEnabled and "ON" or "OFF")
 		settingsRecordNoColBtn.BackgroundColor3 = recordNoCollisionEnabled and Color3.fromRGB(74, 56, 18) or Color3.fromRGB(29, 56, 84)
@@ -900,7 +894,7 @@ local function statusText()
 	local recordFreezeText = (mode == "record" and frozen and "ON") or "OFF"
 	local shiftStateText = isShiftLockActive() and "ON" or "OFF"
 	return string.format(
-		"Mode: %s | Frozen: %s | RecFreeze: %s | ShiftLock: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | TimelineFPS: %d | Inputs: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  T/Y Seek  C/V Checkpoint  / Command  U UI  F2 Hide",
+		"Mode: %s | Frozen: %s | RecFreeze: %s | ShiftLock: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | CameraMode: %s | TimelineFPS: %d | Inputs: %s | SeekSpeed: %.2f | PlaySpeed: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  T/Y Seek  C/V Checkpoint  / Command  U UI  F2 Hide",
 		mode,
 		tostring(frozen),
 		recordFreezeText,
@@ -910,6 +904,7 @@ local function statusText()
 		lastTrimmedCount,
 		recordMode,
 		playbackMode,
+		cameraMode,
 		CONFIG.TIMELINE_FPS,
 		virtualInputPlaybackEnabled and "ON" or "OFF",
 		seekSpeed,
@@ -1026,7 +1021,7 @@ commandBar.TextColor3 = Color3.fromRGB(232, 240, 255)
 commandBar.BorderSizePixel = 0
 commandBar.TextXAlignment = Enum.TextXAlignment.Left
 commandBar.Font = Enum.Font.Code
-commandBar.PlaceholderText = "help | inputs on/off | playbackmode physics/ghost/smooth | recordnocollision on/off"
+commandBar.PlaceholderText = "help | inputs on/off | cameramode exact/smooth | playbackmode physics/ghost/smooth"
 commandBar.TextSize = 15
 commandBar.ClearTextOnFocus = false
 commandBar.Text = ""
@@ -1051,7 +1046,7 @@ settingsLayout.Parent = settingsFrame
 
 local function makeSettingButton()
 	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.fromOffset(118, 32)
+	btn.Size = UDim2.fromOffset(100, 32)
 	btn.BackgroundColor3 = Color3.fromRGB(27, 38, 56)
 	btn.BorderSizePixel = 0
 	btn.TextColor3 = Color3.fromRGB(230, 238, 255)
@@ -1070,6 +1065,8 @@ settingsOverlayBtn = makeSettingButton()
 settingsOverlayBtn.Parent = settingsFrame
 settingsPlaybackModeBtn = makeSettingButton()
 settingsPlaybackModeBtn.Parent = settingsFrame
+settingsCameraModeBtn = makeSettingButton()
+settingsCameraModeBtn.Parent = settingsFrame
 settingsRecordNoColBtn = makeSettingButton()
 settingsRecordNoColBtn.Parent = settingsFrame
 settingsRecordModeBtn = makeSettingButton()
@@ -1393,6 +1390,19 @@ local function cyclePlaybackMode()
 	refreshSettingsUI()
 end
 
+local function cycleCameraMode()
+	if cameraMode == "exact" then
+		cameraMode = "smooth"
+	else
+		cameraMode = "exact"
+	end
+	if mode == "play" then
+		resetCameraSmoothingClock()
+	end
+	log("Camera mode set to " .. cameraMode)
+	refreshSettingsUI()
+end
+
 local function cycleRecordMode()
 	if recordMode == "replace" then
 		recordMode = "append"
@@ -1422,6 +1432,7 @@ settingsOverlayBtn.MouseButton1Click:Connect(function()
 end)
 
 settingsPlaybackModeBtn.MouseButton1Click:Connect(cyclePlaybackMode)
+settingsCameraModeBtn.MouseButton1Click:Connect(cycleCameraMode)
 
 settingsRecordNoColBtn.MouseButton1Click:Connect(function()
 	recordNoCollisionEnabled = not recordNoCollisionEnabled
@@ -1761,6 +1772,7 @@ local function commandHelp()
 	log("overlay <on|off>")
 	log("recordnocollision <on|off>")
 	log("playbackmode <ghost|physics|smooth>")
+	log("cameramode <exact|smooth>")
 	log("recordmode <replace|append>")
 	log("status")
 	log("clearlog")
@@ -1875,6 +1887,21 @@ local function runCommand(raw)
 		return
 	end
 
+	if cmd == "cameramode" then
+		local newMode = string.lower(args[2] or "")
+		if newMode ~= "exact" and newMode ~= "smooth" then
+			log("Usage: cameramode <exact|smooth>")
+			return
+		end
+		cameraMode = newMode
+		if mode == "play" then
+			resetCameraSmoothingClock()
+		end
+		log("Camera mode set to " .. cameraMode)
+		refreshSettingsUI()
+		return
+	end
+
 	if cmd == "recordmode" then
 		local newMode = string.lower(args[2] or "")
 		if newMode ~= "replace" and newMode ~= "append" then
@@ -1971,6 +1998,14 @@ UIS.InputBegan:Connect(function(input, gp)
 		updateUI()
 		return
 	end
+
+	if input.UserInputType == Enum.UserInputType.Keyboard then
+		local kcShift = input.KeyCode
+		if kcShift == Enum.KeyCode.LeftShift or kcShift == Enum.KeyCode.RightShift then
+			handleShiftLockKey()
+		end
+	end
+
 	if gp then
 		return
 	end
@@ -1979,9 +2014,6 @@ UIS.InputBegan:Connect(function(input, gp)
 	end
 
 	local kc = input.KeyCode
-	if kc == Enum.KeyCode.LeftShift or kc == Enum.KeyCode.RightShift then
-		handleShiftLockKey()
-	end
 
 	if kc == Enum.KeyCode.F8 then
 		if mode == "record" then
@@ -2199,6 +2231,7 @@ shiftLockState = isShiftLockActive()
 
 log("Loaded v0.9.2. PlaceId: " .. tostring(game.PlaceId))
 log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics|smooth')")
+log("Camera mode: " .. cameraMode .. " (use 'cameramode exact|smooth')")
 log("Timeline FPS locked: " .. tostring(CONFIG.TIMELINE_FPS))
 log("Virtual input playback: " .. (virtualInputPlaybackEnabled and "on" or "off") .. " (use 'inputs on|off')")
 log("Record no-collision: " .. (recordNoCollisionEnabled and "on" or "off") .. " (use 'recordnocollision on|off')")
