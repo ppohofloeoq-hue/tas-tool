@@ -54,6 +54,10 @@ local CONFIG = {
 	PHYSICS_MIN_BLEND = 0.35,
 	PHYSICS_MAX_BLEND = 0.95,
 	PHYSICS_ANGULAR_BLEND = 0.35,
+	PHYSICS_ORIENTATION_BLEND = 0.34,
+	PHYSICS_ORIENTATION_DYNAMIC_GAIN = 0.012,
+	PHYSICS_ORIENTATION_MIN_BLEND = 0.2,
+	PHYSICS_ORIENTATION_MAX_BLEND = 0.72,
 	PHYSICS_CORRECTION_BLEND = 0.35,
 	OVERLAY_MOUSE_RADIUS = 58,
 	OVERLAY_MOUSE_SENSITIVITY = 420,
@@ -408,32 +412,45 @@ local function pressedMapFromFrame(frame)
 	return pressed
 end
 
-local function movementFromPressedMap(pressed, rootCF)
-	local x = 0
-	local z = 0
+local function movementFromPressedMap(pressed, basisCF)
+	local moveRight = 0
+	local moveForward = 0
 	if pressed.W or pressed.Up then
-		z = z - 1
+		moveForward = moveForward + 1
 	end
 	if pressed.S or pressed.Down then
-		z = z + 1
+		moveForward = moveForward - 1
 	end
 	if pressed.A or pressed.Left then
-		x = x - 1
+		moveRight = moveRight - 1
 	end
 	if pressed.D or pressed.Right then
-		x = x + 1
+		moveRight = moveRight + 1
 	end
 
-	local localMove = Vector3.new(x, 0, z)
-	if localMove.Magnitude > 1 then
-		localMove = localMove.Unit
-	end
-	if localMove.Magnitude <= 0 then
+	if moveRight == 0 and moveForward == 0 then
 		return Vector3.zero
 	end
 
-	local rootRot = rootCF - rootCF.Position
-	return rootRot:VectorToWorldSpace(localMove)
+	local forward = Vector3.new(0, 0, -1)
+	local right = Vector3.new(1, 0, 0)
+	if basisCF then
+		local flatForward = Vector3.new(basisCF.LookVector.X, 0, basisCF.LookVector.Z)
+		if flatForward.Magnitude > 0.0001 then
+			forward = flatForward.Unit
+		end
+
+		local flatRight = Vector3.new(basisCF.RightVector.X, 0, basisCF.RightVector.Z)
+		if flatRight.Magnitude > 0.0001 then
+			right = flatRight.Unit
+		end
+	end
+
+	local worldMove = (right * moveRight) + (forward * moveForward)
+	if worldMove.Magnitude > 1 then
+		worldMove = worldMove.Unit
+	end
+	return worldMove
 end
 
 local function movementFromVelocity(vel)
@@ -663,7 +680,7 @@ local function applyPlaybackLock()
 	if (playbackMode == "smooth" or playbackMode == "physics") and not frozen then
 		hum.WalkSpeed = playbackState.saved.WalkSpeed
 		hum.JumpPower = playbackState.saved.JumpPower
-		hum.AutoRotate = true
+		hum.AutoRotate = (playbackMode ~= "physics")
 	else
 		hum.WalkSpeed = 0
 		hum.JumpPower = 0
@@ -869,7 +886,7 @@ local function applyFrame(i)
 		local targetVel = tableToV3(frame.vel)
 		local posError = rootCF.Position - hrp.Position
 		local dist = posError.Magnitude
-		local moveDir = movementFromPressedMap(pressed, rootCF)
+		local moveDir = movementFromPressedMap(pressed, camCF)
 		if moveDir.Magnitude <= 0 then
 			moveDir = movementFromVelocity(targetVel)
 		end
@@ -912,6 +929,17 @@ local function applyFrame(i)
 				tableToV3(frame.rotvel),
 				CONFIG.PHYSICS_ANGULAR_BLEND
 			)
+
+			local targetRot = rootCF - rootCF.Position
+			local currentPos = hrp.Position
+			local currentRot = hrp.CFrame - currentPos
+			local orientBlend = math.clamp(
+				CONFIG.PHYSICS_ORIENTATION_BLEND + (dist * CONFIG.PHYSICS_ORIENTATION_DYNAMIC_GAIN),
+				CONFIG.PHYSICS_ORIENTATION_MIN_BLEND,
+				CONFIG.PHYSICS_ORIENTATION_MAX_BLEND
+			)
+			local blendedRot = currentRot:Lerp(targetRot, orientBlend)
+			hrp.CFrame = CFrame.new(currentPos) * (blendedRot - blendedRot.Position)
 		end
 	else
 		local targetVel = tableToV3(frame.vel)
@@ -949,10 +977,15 @@ local function applyFrame(i)
 				camera.CFrame = camCF
 			end
 		elseif playbackMode == "physics" and not frozen then
+			local camLocalCF = tableToCf(frame.cam_local)
+			local targetCamCF = camCF
+			if camLocalCF then
+				targetCamCF = hrp.CFrame * camLocalCF
+			end
 			if cameraMode == "exact" then
-				camera.CFrame = camCF
+				camera.CFrame = targetCamCF
 			else
-				smoothCameraTo(camCF)
+				smoothCameraTo(targetCamCF)
 			end
 		else
 			camera.CFrame = camCF
@@ -980,7 +1013,7 @@ local function setCapActive(capData, active)
 		capData.frame.BackgroundColor3 = Color3.fromRGB(245, 245, 245)
 		capData.label.TextColor3 = Color3.fromRGB(12, 12, 12)
 	else
-		capData.frame.BackgroundColor3 = Color3.fromRGB(8, 8, 8)
+		capData.frame.BackgroundColor3 = Color3.fromRGB(24, 30, 41)
 		capData.label.TextColor3 = Color3.fromRGB(245, 245, 245)
 	end
 end
@@ -1106,7 +1139,7 @@ end
 local function refreshSettingsUI()
 	if settingsInputsBtn then
 		settingsInputsBtn.Text = "Inputs: " .. (virtualInputPlaybackEnabled and "ON" or "OFF")
-		settingsInputsBtn.BackgroundColor3 = virtualInputPlaybackEnabled and Color3.fromRGB(26, 76, 50) or Color3.fromRGB(70, 33, 33)
+		settingsInputsBtn.BackgroundColor3 = virtualInputPlaybackEnabled and Color3.fromRGB(51, 96, 78) or Color3.fromRGB(92, 67, 67)
 	end
 	if settingsPlaybackModeBtn then
 		settingsPlaybackModeBtn.Text = "Playback: " .. tostring(playbackMode)
@@ -1116,7 +1149,7 @@ local function refreshSettingsUI()
 	end
 	if settingsRecordNoColBtn then
 		settingsRecordNoColBtn.Text = "RecNoCol: " .. (recordNoCollisionEnabled and "ON" or "OFF")
-		settingsRecordNoColBtn.BackgroundColor3 = recordNoCollisionEnabled and Color3.fromRGB(74, 56, 18) or Color3.fromRGB(29, 56, 84)
+		settingsRecordNoColBtn.BackgroundColor3 = recordNoCollisionEnabled and Color3.fromRGB(98, 86, 56) or Color3.fromRGB(68, 93, 124)
 	end
 	if settingsRecordModeBtn then
 		settingsRecordModeBtn.Text = "RecMode: " .. tostring(recordMode)
@@ -1126,7 +1159,7 @@ local function refreshSettingsUI()
 	end
 	if settingsOverlayBtn then
 		settingsOverlayBtn.Text = "Overlay: " .. (inputOverlayEnabled and "ON" or "OFF")
-		settingsOverlayBtn.BackgroundColor3 = inputOverlayEnabled and Color3.fromRGB(31, 68, 98) or Color3.fromRGB(62, 38, 38)
+		settingsOverlayBtn.BackgroundColor3 = inputOverlayEnabled and Color3.fromRGB(72, 105, 146) or Color3.fromRGB(90, 67, 67)
 	end
 end
 
@@ -1178,31 +1211,31 @@ gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 mainFrame = Instance.new("Frame")
 mainFrame.Size = UDim2.fromOffset(780, 410)
 mainFrame.Position = UDim2.fromOffset(16, 12)
-mainFrame.BackgroundColor3 = Color3.fromRGB(18, 22, 30)
+mainFrame.BackgroundColor3 = Color3.fromRGB(24, 29, 38)
 mainFrame.BorderSizePixel = 0
 mainFrame.ClipsDescendants = true
 mainFrame.Parent = gui
 
 local mainCorner = Instance.new("UICorner")
-mainCorner.CornerRadius = UDim.new(0, 8)
+mainCorner.CornerRadius = UDim.new(0, 12)
 mainCorner.Parent = mainFrame
 
 local mainStroke = Instance.new("UIStroke")
-mainStroke.Color = Color3.fromRGB(70, 120, 205)
-mainStroke.Thickness = 1.5
-mainStroke.Transparency = 0.15
+mainStroke.Color = Color3.fromRGB(126, 164, 225)
+mainStroke.Thickness = 1.2
+mainStroke.Transparency = 0.28
 mainStroke.Parent = mainFrame
 
 local topBar = Instance.new("Frame")
 topBar.Size = UDim2.new(1, 0, 0, 36)
-topBar.BackgroundColor3 = Color3.fromRGB(24, 33, 47)
+topBar.BackgroundColor3 = Color3.fromRGB(43, 57, 79)
 topBar.BorderSizePixel = 0
 topBar.Parent = mainFrame
 
 local topGrad = Instance.new("UIGradient")
 topGrad.Color = ColorSequence.new({
-	ColorSequenceKeypoint.new(0, Color3.fromRGB(66, 112, 189)),
-	ColorSequenceKeypoint.new(1, Color3.fromRGB(34, 57, 97)),
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(132, 170, 233)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(76, 112, 178)),
 })
 topGrad.Rotation = 12
 topGrad.Parent = topBar
@@ -1221,10 +1254,10 @@ titleLabel.Parent = topBar
 shiftLockIndicator = Instance.new("TextLabel")
 shiftLockIndicator.Size = UDim2.fromOffset(140, 22)
 shiftLockIndicator.Position = UDim2.new(1, -150, 0, 7)
-shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(76, 40, 40)
+shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(90, 63, 63)
 shiftLockIndicator.BackgroundTransparency = 0.15
 shiftLockIndicator.BorderSizePixel = 0
-shiftLockIndicator.TextColor3 = Color3.fromRGB(255, 226, 226)
+shiftLockIndicator.TextColor3 = Color3.fromRGB(255, 236, 236)
 shiftLockIndicator.Font = Enum.Font.GothamSemibold
 shiftLockIndicator.TextSize = 12
 shiftLockIndicator.Text = "ShiftLock REC: OFF"
@@ -1237,8 +1270,8 @@ shiftCorner.Parent = shiftLockIndicator
 settingsToggleBtn = Instance.new("TextButton")
 settingsToggleBtn.Size = UDim2.fromOffset(28, 22)
 settingsToggleBtn.Position = UDim2.new(1, -184, 0, 7)
-settingsToggleBtn.BackgroundColor3 = Color3.fromRGB(36, 58, 97)
-settingsToggleBtn.BackgroundTransparency = 0.12
+settingsToggleBtn.BackgroundColor3 = Color3.fromRGB(78, 114, 172)
+settingsToggleBtn.BackgroundTransparency = 0.2
 settingsToggleBtn.BorderSizePixel = 0
 settingsToggleBtn.TextColor3 = Color3.fromRGB(225, 236, 255)
 settingsToggleBtn.Font = Enum.Font.GothamBold
@@ -1247,16 +1280,16 @@ settingsToggleBtn.Text = "+"
 settingsToggleBtn.Parent = topBar
 
 local settingsToggleCorner = Instance.new("UICorner")
-settingsToggleCorner.CornerRadius = UDim.new(0, 6)
+settingsToggleCorner.CornerRadius = UDim.new(0, 8)
 settingsToggleCorner.Parent = settingsToggleBtn
 
 local label = Instance.new("TextLabel")
 label.Size = UDim2.new(1, -20, 0, 96)
 label.Position = UDim2.fromOffset(10, 44)
-label.BackgroundColor3 = Color3.fromRGB(14, 18, 26)
-label.BackgroundTransparency = 0.08
+label.BackgroundColor3 = Color3.fromRGB(31, 38, 50)
+label.BackgroundTransparency = 0.12
 label.BorderSizePixel = 0
-label.TextColor3 = Color3.fromRGB(224, 232, 247)
+label.TextColor3 = Color3.fromRGB(235, 241, 251)
 label.TextXAlignment = Enum.TextXAlignment.Left
 label.TextYAlignment = Enum.TextYAlignment.Top
 label.Font = Enum.Font.Code
@@ -1265,15 +1298,15 @@ label.Text = ""
 label.Parent = mainFrame
 
 local labelCorner = Instance.new("UICorner")
-labelCorner.CornerRadius = UDim.new(0, 6)
+labelCorner.CornerRadius = UDim.new(0, 8)
 labelCorner.Parent = label
 
 local commandBar = Instance.new("TextBox")
 commandBar.Size = UDim2.new(1, -20, 0, 30)
 commandBar.Position = UDim2.fromOffset(10, 148)
-commandBar.BackgroundColor3 = Color3.fromRGB(10, 13, 20)
-commandBar.BackgroundTransparency = 0.05
-commandBar.TextColor3 = Color3.fromRGB(232, 240, 255)
+commandBar.BackgroundColor3 = Color3.fromRGB(26, 33, 45)
+commandBar.BackgroundTransparency = 0.08
+commandBar.TextColor3 = Color3.fromRGB(238, 244, 255)
 commandBar.BorderSizePixel = 0
 commandBar.TextXAlignment = Enum.TextXAlignment.Left
 commandBar.Font = Enum.Font.Code
@@ -1284,7 +1317,7 @@ commandBar.Text = ""
 commandBar.Parent = mainFrame
 
 local commandCorner = Instance.new("UICorner")
-commandCorner.CornerRadius = UDim.new(0, 6)
+commandCorner.CornerRadius = UDim.new(0, 8)
 commandCorner.Parent = commandBar
 
 settingsFrame = Instance.new("Frame")
@@ -1303,14 +1336,14 @@ settingsLayout.Parent = settingsFrame
 local function makeSettingButton()
 	local btn = Instance.new("TextButton")
 	btn.Size = UDim2.fromOffset(100, 32)
-	btn.BackgroundColor3 = Color3.fromRGB(27, 38, 56)
+	btn.BackgroundColor3 = Color3.fromRGB(45, 58, 79)
 	btn.BorderSizePixel = 0
 	btn.TextColor3 = Color3.fromRGB(230, 238, 255)
 	btn.Font = Enum.Font.GothamSemibold
 	btn.TextSize = 12
 	btn.AutoButtonColor = true
 	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 6)
+	corner.CornerRadius = UDim.new(0, 8)
 	corner.Parent = btn
 	return btn
 end
@@ -1333,9 +1366,9 @@ settingsPlaySpeedBtn.Parent = settingsFrame
 logLabel = Instance.new("TextLabel")
 logLabel.Size = UDim2.new(1, -20, 1, -190)
 logLabel.Position = UDim2.fromOffset(10, 186)
-logLabel.BackgroundColor3 = Color3.fromRGB(9, 12, 18)
-logLabel.BackgroundTransparency = 0.05
-logLabel.TextColor3 = Color3.fromRGB(177, 255, 205)
+logLabel.BackgroundColor3 = Color3.fromRGB(23, 29, 40)
+logLabel.BackgroundTransparency = 0.12
+logLabel.TextColor3 = Color3.fromRGB(190, 244, 213)
 logLabel.TextXAlignment = Enum.TextXAlignment.Left
 logLabel.TextYAlignment = Enum.TextYAlignment.Top
 logLabel.Font = Enum.Font.Code
@@ -1346,27 +1379,27 @@ logLabel.Text = ""
 logLabel.Parent = mainFrame
 
 local logCorner = Instance.new("UICorner")
-logCorner.CornerRadius = UDim.new(0, 6)
+logCorner.CornerRadius = UDim.new(0, 8)
 logCorner.Parent = logLabel
 
 inputOverlayFrame = Instance.new("Frame")
 inputOverlayFrame.Size = UDim2.fromOffset(430, 190)
 inputOverlayFrame.AnchorPoint = Vector2.new(1, 1)
 inputOverlayFrame.Position = UDim2.new(1, -16, 1, -16)
-inputOverlayFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-inputOverlayFrame.BackgroundTransparency = 0.2
+inputOverlayFrame.BackgroundColor3 = Color3.fromRGB(16, 21, 30)
+inputOverlayFrame.BackgroundTransparency = 0.12
 inputOverlayFrame.BorderSizePixel = 0
 inputOverlayFrame.Visible = false
 inputOverlayFrame.ZIndex = 15
 inputOverlayFrame.Parent = gui
 
 local inputOverlayCorner = Instance.new("UICorner")
-inputOverlayCorner.CornerRadius = UDim.new(0, 10)
+inputOverlayCorner.CornerRadius = UDim.new(0, 12)
 inputOverlayCorner.Parent = inputOverlayFrame
 
 local inputOverlayStroke = Instance.new("UIStroke")
-inputOverlayStroke.Color = Color3.fromRGB(220, 220, 220)
-inputOverlayStroke.Transparency = 0.8
+inputOverlayStroke.Color = Color3.fromRGB(183, 205, 241)
+inputOverlayStroke.Transparency = 0.65
 inputOverlayStroke.Thickness = 1.2
 inputOverlayStroke.Parent = inputOverlayFrame
 
@@ -1381,8 +1414,8 @@ local function createInputCap(name, text, size, pos)
 	cap.Name = "Cap_" .. name
 	cap.Size = size
 	cap.Position = pos
-	cap.BackgroundColor3 = Color3.fromRGB(8, 8, 8)
-	cap.BackgroundTransparency = 0.02
+	cap.BackgroundColor3 = Color3.fromRGB(24, 30, 41)
+	cap.BackgroundTransparency = 0
 	cap.BorderSizePixel = 0
 	cap.Parent = keyboardHolder
 
@@ -1421,7 +1454,7 @@ mouseHolder.Parent = inputOverlayFrame
 local mouseCircle = Instance.new("Frame")
 mouseCircle.Size = UDim2.fromOffset(172, 172)
 mouseCircle.Position = UDim2.fromOffset(8, 1)
-mouseCircle.BackgroundColor3 = Color3.fromRGB(8, 8, 8)
+mouseCircle.BackgroundColor3 = Color3.fromRGB(24, 30, 41)
 mouseCircle.BorderSizePixel = 0
 mouseCircle.Parent = mouseHolder
 
@@ -1500,7 +1533,7 @@ inputOverlayFrame.ZIndex = 15
 
 local loadingOverlay = Instance.new("Frame")
 loadingOverlay.Size = UDim2.fromScale(1, 1)
-loadingOverlay.BackgroundColor3 = Color3.fromRGB(7, 10, 16)
+loadingOverlay.BackgroundColor3 = Color3.fromRGB(14, 18, 25)
 loadingOverlay.BackgroundTransparency = 0.08
 loadingOverlay.BorderSizePixel = 0
 loadingOverlay.ZIndex = 100
@@ -1510,7 +1543,7 @@ local loadingPanel = Instance.new("Frame")
 loadingPanel.Size = UDim2.fromOffset(440, 150)
 loadingPanel.AnchorPoint = Vector2.new(0.5, 0.5)
 loadingPanel.Position = UDim2.fromScale(0.5, 0.5)
-loadingPanel.BackgroundColor3 = Color3.fromRGB(17, 24, 36)
+loadingPanel.BackgroundColor3 = Color3.fromRGB(28, 36, 50)
 loadingPanel.BorderSizePixel = 0
 loadingPanel.ZIndex = 101
 loadingPanel.Parent = loadingOverlay
@@ -1520,7 +1553,7 @@ loadCorner.CornerRadius = UDim.new(0, 8)
 loadCorner.Parent = loadingPanel
 
 local loadStroke = Instance.new("UIStroke")
-loadStroke.Color = Color3.fromRGB(74, 130, 220)
+loadStroke.Color = Color3.fromRGB(129, 166, 230)
 loadStroke.Thickness = 1.5
 loadStroke.Parent = loadingPanel
 
@@ -1541,7 +1574,7 @@ loadHint.Size = UDim2.new(1, -24, 0, 22)
 loadHint.Position = UDim2.fromOffset(12, 52)
 loadHint.BackgroundTransparency = 1
 loadHint.Text = "Preparing timeline..."
-loadHint.TextColor3 = Color3.fromRGB(165, 187, 227)
+loadHint.TextColor3 = Color3.fromRGB(187, 206, 236)
 loadHint.Font = Enum.Font.Gotham
 loadHint.TextSize = 14
 loadHint.TextXAlignment = Enum.TextXAlignment.Left
@@ -1563,7 +1596,7 @@ loadPercent.Parent = loadingPanel
 local loadTrack = Instance.new("Frame")
 loadTrack.Size = UDim2.new(1, -24, 0, 14)
 loadTrack.Position = UDim2.fromOffset(12, 94)
-loadTrack.BackgroundColor3 = Color3.fromRGB(35, 44, 59)
+loadTrack.BackgroundColor3 = Color3.fromRGB(58, 70, 92)
 loadTrack.BorderSizePixel = 0
 loadTrack.ZIndex = 101
 loadTrack.Parent = loadingPanel
@@ -1574,7 +1607,7 @@ loadTrackCorner.Parent = loadTrack
 
 local loadFill = Instance.new("Frame")
 loadFill.Size = UDim2.fromScale(0, 1)
-loadFill.BackgroundColor3 = Color3.fromRGB(105, 203, 255)
+loadFill.BackgroundColor3 = Color3.fromRGB(139, 201, 255)
 loadFill.BorderSizePixel = 0
 loadFill.ZIndex = 102
 loadFill.Parent = loadTrack
@@ -1744,10 +1777,10 @@ updateUI = function()
 		if lastShiftIndicatorState == nil or shiftOn ~= lastShiftIndicatorState then
 			shiftLockIndicator.Text = "ShiftLock REC: " .. (shiftOn and "ON" or "OFF")
 			if shiftOn then
-				shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(32, 95, 63)
+				shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(52, 112, 82)
 				shiftLockIndicator.TextColor3 = Color3.fromRGB(210, 255, 231)
 			else
-				shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(76, 40, 40)
+				shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(90, 63, 63)
 				shiftLockIndicator.TextColor3 = Color3.fromRGB(255, 226, 226)
 			end
 			lastShiftIndicatorState = shiftOn
