@@ -1,5 +1,5 @@
 --[[
-TAS Lite v0.9.0 (Roblox, LocalScript/executor)
+TAS Lite v0.9.1 (Roblox, LocalScript/executor)
 - Stable record/playback timing
 - Fixed 60 FPS record/playback timeline
 - Virtual input playback (keyboard + mouse buttons)
@@ -8,6 +8,7 @@ TAS Lite v0.9.0 (Roblox, LocalScript/executor)
 - Save/load JSON (backward compatible with v0.1/v0.2 frames)
 - On-screen log + record freeze/trim indicators
 - Animated loading overlay + refreshed GUI
+- Settings panel toggle via `+` button
 - Playback mode: ghost (exact) or physics (with collisions)
 - Physics mode tuned for more human-like motion
 
@@ -79,6 +80,8 @@ local playbackSpeed = CONFIG.PLAYBACK_SPEED
 local playbackMode = CONFIG.PLAYBACK_MODE
 local playbackAccumulator = 0
 local recordAccumulator = 0
+local lastPlaybackClock = 0
+local lastRecordClock = 0
 local lastTrimmedCount = 0
 local logLines = {}
 local logLabel
@@ -98,6 +101,8 @@ local settingsPlaySpeedBtn
 local inputOverlayFrame
 local inputOverlayLabel
 local shiftLockIndicator
+local settingsToggleBtn
+local settingsOpen = false
 
 local VIRTUAL_INPUT_BLACKLIST = {
 	F2 = true,
@@ -700,6 +705,22 @@ local function refreshSettingsUI()
 	end
 end
 
+local function applySettingsVisibility()
+	if not settingsFrame or not logLabel or not settingsToggleBtn then
+		return
+	end
+
+	settingsFrame.Visible = settingsOpen
+	settingsToggleBtn.Text = settingsOpen and "-" or "+"
+	if settingsOpen then
+		logLabel.Position = UDim2.fromOffset(10, 224)
+		logLabel.Size = UDim2.new(1, -20, 1, -228)
+	else
+		logLabel.Position = UDim2.fromOffset(10, 186)
+		logLabel.Size = UDim2.new(1, -20, 1, -190)
+	end
+end
+
 local function statusText()
 	local recordFreezeText = (mode == "record" and frozen and "ON") or "OFF"
 	local shiftStateText = isShiftLockActive() and "ON" or "OFF"
@@ -787,6 +808,22 @@ local shiftCorner = Instance.new("UICorner")
 shiftCorner.CornerRadius = UDim.new(0, 6)
 shiftCorner.Parent = shiftLockIndicator
 
+settingsToggleBtn = Instance.new("TextButton")
+settingsToggleBtn.Size = UDim2.fromOffset(28, 22)
+settingsToggleBtn.Position = UDim2.new(1, -184, 0, 7)
+settingsToggleBtn.BackgroundColor3 = Color3.fromRGB(36, 58, 97)
+settingsToggleBtn.BackgroundTransparency = 0.12
+settingsToggleBtn.BorderSizePixel = 0
+settingsToggleBtn.TextColor3 = Color3.fromRGB(225, 236, 255)
+settingsToggleBtn.Font = Enum.Font.GothamBold
+settingsToggleBtn.TextSize = 16
+settingsToggleBtn.Text = "+"
+settingsToggleBtn.Parent = topBar
+
+local settingsToggleCorner = Instance.new("UICorner")
+settingsToggleCorner.CornerRadius = UDim.new(0, 6)
+settingsToggleCorner.Parent = settingsToggleBtn
+
 local label = Instance.new("TextLabel")
 label.Size = UDim2.new(1, -20, 0, 96)
 label.Position = UDim2.fromOffset(10, 44)
@@ -829,6 +866,7 @@ settingsFrame.Size = UDim2.new(1, -20, 0, 32)
 settingsFrame.Position = UDim2.fromOffset(10, 186)
 settingsFrame.BackgroundTransparency = 1
 settingsFrame.Parent = mainFrame
+settingsFrame.Visible = false
 
 local settingsLayout = Instance.new("UIListLayout")
 settingsLayout.FillDirection = Enum.FillDirection.Horizontal
@@ -863,8 +901,8 @@ settingsPlaySpeedBtn = makeSettingButton()
 settingsPlaySpeedBtn.Parent = settingsFrame
 
 logLabel = Instance.new("TextLabel")
-logLabel.Size = UDim2.new(1, -20, 1, -228)
-logLabel.Position = UDim2.fromOffset(10, 224)
+logLabel.Size = UDim2.new(1, -20, 1, -190)
+logLabel.Position = UDim2.fromOffset(10, 186)
 logLabel.BackgroundColor3 = Color3.fromRGB(9, 12, 18)
 logLabel.BackgroundTransparency = 0.05
 logLabel.TextColor3 = Color3.fromRGB(177, 255, 205)
@@ -1104,6 +1142,11 @@ settingsPlaySpeedBtn.MouseButton1Click:Connect(function()
 	refreshSettingsUI()
 end)
 
+settingsToggleBtn.MouseButton1Click:Connect(function()
+	settingsOpen = not settingsOpen
+	applySettingsVisibility()
+end)
+
 local function getUIParent()
 	if gethui then
 		local ok, h = pcall(gethui)
@@ -1116,6 +1159,7 @@ end
 
 gui.Parent = getUIParent()
 playIntroAnimation()
+applySettingsVisibility()
 
 local function updateUI()
 	label.Text = statusText()
@@ -1134,6 +1178,7 @@ local function updateUI()
 		inputOverlayFrame.Visible = (mode == "play")
 	end
 	refreshSettingsUI()
+	applySettingsVisibility()
 	gui.Enabled = (uiVisible and not forceHideUI)
 end
 
@@ -1259,6 +1304,8 @@ local function startRecord()
 	seekDir = 0
 	playbackAccumulator = 0
 	recordAccumulator = 0
+	lastRecordClock = tick()
+	lastPlaybackClock = 0
 	releaseAllVirtualInputs()
 	updatePlaybackInputOverlay(nil)
 	clearPlaybackLock()
@@ -1289,6 +1336,7 @@ local function stopRecord()
 	clearRecordFreezeLock()
 	clearRecordNoCollision()
 	recordAccumulator = 0
+	lastRecordClock = 0
 	lastRecordedShiftLockState = nil
 	updatePlaybackInputOverlay(nil)
 	mode = "idle"
@@ -1307,6 +1355,8 @@ local function startPlay()
 	lastTrimmedCount = 0
 	playbackAccumulator = 0
 	recordAccumulator = 0
+	lastPlaybackClock = tick()
+	lastRecordClock = 0
 	releaseAllVirtualInputs()
 	updatePlaybackInputOverlay(nil)
 	clearRecordNoCollision()
@@ -1326,6 +1376,8 @@ local function stopPlay()
 	seekDir = 0
 	playbackAccumulator = 0
 	recordAccumulator = 0
+	lastPlaybackClock = 0
+	lastRecordClock = 0
 	releaseAllVirtualInputs()
 	updatePlaybackInputOverlay(nil)
 	clearPlaybackLock()
@@ -1685,7 +1737,24 @@ commandBar.FocusLost:Connect(function(enterPressed)
 end)
 
 RunService.RenderStepped:Connect(function(dt)
+	local nowClock = tick()
+	local clockDtRecord = 0
+	local clockDtPlay = 0
+	if lastRecordClock > 0 then
+		clockDtRecord = math.max(0, nowClock - lastRecordClock)
+	end
+	if lastPlaybackClock > 0 then
+		clockDtPlay = math.max(0, nowClock - lastPlaybackClock)
+	end
+
+	local dtSafe = tonumber(dt) or 0
+	if dtSafe < 0 then
+		dtSafe = 0
+	end
+
 	if mode == "record" then
+		lastRecordClock = nowClock
+		lastPlaybackClock = 0
 		applyRecordNoCollision()
 		if frozen then
 			applyRecordFreezeLock()
@@ -1699,7 +1768,8 @@ RunService.RenderStepped:Connect(function(dt)
 			end
 		else
 			clearRecordFreezeLock()
-			recordAccumulator = recordAccumulator + dt
+			local recordDelta = clockDtRecord > 0 and clockDtRecord or dtSafe
+			recordAccumulator = recordAccumulator + recordDelta
 			if recordAccumulator > CONFIG.PLAYBACK_MAX_ACCUMULATOR then
 				recordAccumulator = CONFIG.PLAYBACK_MAX_ACCUMULATOR
 			end
@@ -1712,6 +1782,8 @@ RunService.RenderStepped:Connect(function(dt)
 			end
 		end
 	elseif mode == "play" then
+		lastPlaybackClock = nowClock
+		lastRecordClock = 0
 		if #frames == 0 then
 			stopPlay()
 			updateUI()
@@ -1731,7 +1803,8 @@ RunService.RenderStepped:Connect(function(dt)
 			end
 			applyFrame(playIndex)
 		else
-			playbackAccumulator = playbackAccumulator + (dt * playbackSpeed)
+			local playDelta = clockDtPlay > 0 and clockDtPlay or dtSafe
+			playbackAccumulator = playbackAccumulator + (playDelta * playbackSpeed)
 			if playbackAccumulator > CONFIG.PLAYBACK_MAX_ACCUMULATOR then
 				playbackAccumulator = CONFIG.PLAYBACK_MAX_ACCUMULATOR
 			end
@@ -1777,6 +1850,9 @@ RunService.RenderStepped:Connect(function(dt)
 				stopPlay()
 			end
 		end
+	else
+		lastPlaybackClock = 0
+		lastRecordClock = 0
 	end
 
 	updateUI()
@@ -1795,7 +1871,7 @@ end)
 
 shiftLockState = isShiftLockActive()
 
-log("Loaded v0.9.0. PlaceId: " .. tostring(game.PlaceId))
+log("Loaded v0.9.1. PlaceId: " .. tostring(game.PlaceId))
 log("Playback mode: " .. playbackMode .. " (use 'playbackmode ghost|physics|smooth')")
 log("Timeline FPS locked: " .. tostring(CONFIG.TIMELINE_FPS))
 log("Virtual input playback: " .. (virtualInputPlaybackEnabled and "on" or "off") .. " (use 'inputs on|off')")
