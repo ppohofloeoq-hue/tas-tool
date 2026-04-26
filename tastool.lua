@@ -49,6 +49,10 @@ local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local TweenService = game:GetService("TweenService")
 local CoreGui = game:GetService("CoreGui")
+local VirtualInputManager
+pcall(function()
+	VirtualInputManager = game:GetService("VirtualInputManager")
+end)
 
 local oldRuntime = rawget(_G, RUNTIME_KEY)
 if type(oldRuntime) == "table" and type(oldRuntime.cleanup) == "function" then
@@ -124,6 +128,14 @@ local lastAppliedFrame = nil
 local recordBranchPending = false
 local playbackShiftOverride = nil
 local lastPlaybackHumanoidState = nil
+local recordInputState = {
+	keys = {},
+	mouse = {},
+}
+local playbackInputState = {
+	keys = {},
+	mouse = {},
+}
 
 local gui
 local rootFrame
@@ -587,6 +599,129 @@ local function captureShiftLock()
 	return shiftLockState
 end
 
+local toolHotkeys = {
+	F8 = true,
+	F10 = true,
+	F6 = true,
+	F7 = true,
+	E = true,
+	F = true,
+	G = true,
+	T = true,
+	Y = true,
+	C = true,
+	V = true,
+	U = true,
+	F2 = true,
+	Slash = true,
+}
+
+local function shouldRecordKey(keyCode)
+	if keyCode == Enum.KeyCode.Unknown then
+		return false
+	end
+	return not toolHotkeys[keyCode.Name]
+end
+
+local function copyInputState()
+	local copy = {
+		keys = {},
+		mouse = {},
+	}
+	for name, down in pairs(recordInputState.keys) do
+		if down then
+			copy.keys[name] = true
+		end
+	end
+	for name, down in pairs(recordInputState.mouse) do
+		if down then
+			copy.mouse[name] = true
+		end
+	end
+	return copy
+end
+
+local function releasePlaybackInputs()
+	if not VirtualInputManager then
+		playbackInputState = { keys = {}, mouse = {} }
+		return
+	end
+	for name, down in pairs(playbackInputState.keys) do
+		if down then
+			local keyCode = Enum.KeyCode[name]
+			if keyCode then
+				pcall(function()
+					VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
+				end)
+			end
+		end
+	end
+	for name, down in pairs(playbackInputState.mouse) do
+		if down then
+			local button = name == "MouseButton2" and 1 or 0
+			pcall(function()
+				VirtualInputManager:SendMouseButtonEvent(0, 0, button, false, game, 0)
+			end)
+		end
+	end
+	playbackInputState = { keys = {}, mouse = {} }
+end
+
+local function applyVirtualInputs(inputData)
+	if not VirtualInputManager then
+		return
+	end
+	inputData = type(inputData) == "table" and inputData or {}
+	local keys = type(inputData.keys) == "table" and inputData.keys or {}
+	local mouse = type(inputData.mouse) == "table" and inputData.mouse or {}
+
+	local seenKeys = {}
+	for name, down in pairs(keys) do
+		seenKeys[name] = true
+		if down and not playbackInputState.keys[name] then
+			local keyCode = Enum.KeyCode[name]
+			if keyCode then
+				pcall(function()
+					VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
+				end)
+			end
+			playbackInputState.keys[name] = true
+		end
+	end
+	for name, down in pairs(playbackInputState.keys) do
+		if down and not seenKeys[name] then
+			local keyCode = Enum.KeyCode[name]
+			if keyCode then
+				pcall(function()
+					VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
+				end)
+			end
+			playbackInputState.keys[name] = nil
+		end
+	end
+
+	local seenMouse = {}
+	for name, down in pairs(mouse) do
+		seenMouse[name] = true
+		if down and not playbackInputState.mouse[name] then
+			local button = name == "MouseButton2" and 1 or 0
+			pcall(function()
+				VirtualInputManager:SendMouseButtonEvent(0, 0, button, true, game, 0)
+			end)
+			playbackInputState.mouse[name] = true
+		end
+	end
+	for name, down in pairs(playbackInputState.mouse) do
+		if down and not seenMouse[name] then
+			local button = name == "MouseButton2" and 1 or 0
+			pcall(function()
+				VirtualInputManager:SendMouseButtonEvent(0, 0, button, false, game, 0)
+			end)
+			playbackInputState.mouse[name] = nil
+		end
+	end
+end
+
 local function toggleShiftLockManual()
 	if mode == "play" then
 		local base = playbackShiftOverride
@@ -646,6 +781,7 @@ local function captureFrame()
 		ang = vecToTable(root.AssemblyAngularVelocity),
 		cam = cfToTable(camera.CFrame),
 		shiftlock = captureShiftLock(),
+		inputs = copyInputState(),
 		health = humanoid and round(humanoid.Health) or nil,
 		state = humanoid and humanoid:GetState().Name or nil,
 	}
@@ -687,6 +823,7 @@ local function sanitizeFrame(raw)
 		ang = vecToTable(tableToVec(raw.ang or raw.angular)),
 		cam = cfToTable(cam),
 		shiftlock = raw.shiftlock == true,
+		inputs = type(raw.inputs) == "table" and raw.inputs or { keys = {}, mouse = {} },
 		health = tonumber(raw.health),
 		state = raw.state,
 		move = vecToTable(tableToVec(raw.move)),
@@ -719,6 +856,7 @@ local function interpolateFrame(a, b, alpha)
 	blended.move = vecToTable(tableToVec(a.move):Lerp(tableToVec(b.move), alpha))
 	if alpha >= 0.5 then
 		blended.shiftlock = b.shiftlock == true
+		blended.inputs = b.inputs
 		blended.jump = b.jump == true
 		blended.sit = b.sit == true
 		blended.state = b.state
@@ -818,6 +956,9 @@ local function applyFrameData(frame, index, dt)
 	if mode == "play" and playbackShiftOverride ~= nil then
 		frameShiftLock = playbackShiftOverride == true
 	end
+	if mode == "play" then
+		applyVirtualInputs(frame.inputs)
+	end
 	setShiftLock(frameShiftLock)
 	if humanoid then
 		pcall(function()
@@ -864,6 +1005,7 @@ local function startRecord()
 		playIndex = 1
 	end
 	recordBranchPending = false
+	recordInputState = { keys = {}, mouse = {} }
 	mode = "record"
 	frozen = false
 	recordAccumulator = 0
@@ -880,6 +1022,7 @@ local function stopPlayback()
 	frozen = false
 	playbackShiftOverride = nil
 	lastPlaybackHumanoidState = nil
+	releasePlaybackInputs()
 	pcall(function()
 		camera.CameraType = startCameraType
 		camera.CameraSubject = startCameraSubject
@@ -899,6 +1042,7 @@ local function startPlayback()
 	frozen = false
 	playbackShiftOverride = nil
 	lastPlaybackHumanoidState = nil
+	releasePlaybackInputs()
 	playIndex = 1
 	playbackAccumulator = 0
 	cameraMode = normalizeCameraMode(cameraMode)
@@ -933,6 +1077,12 @@ local function setFrozen(value)
 		log("Record branch trimmed to frame " .. tostring(playIndex))
 	end
 	frozen = value and true or false
+	if mode == "record" and not frozen then
+		pcall(function()
+			camera.CameraType = startCameraType
+			camera.CameraSubject = startCameraSubject
+		end)
+	end
 	log(tr("frozen") .. ": " .. (frozen and "ON" or "OFF"))
 end
 
@@ -1259,6 +1409,16 @@ connect(commandBox.FocusLost, function(enterPressed)
 end)
 
 connect(UserInputService.InputBegan, function(input, gameProcessed)
+	local focused = UserInputService:GetFocusedTextBox()
+	if mode == "record" and not focused then
+		if input.UserInputType == Enum.UserInputType.Keyboard and shouldRecordKey(input.KeyCode) then
+			recordInputState.keys[input.KeyCode.Name] = true
+		elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+			recordInputState.mouse.MouseButton1 = true
+		elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+			recordInputState.mouse.MouseButton2 = true
+		end
+	end
 	if input.UserInputType ~= Enum.UserInputType.Keyboard then
 		return
 	end
@@ -1268,7 +1428,7 @@ connect(UserInputService.InputBegan, function(input, gameProcessed)
 		end)
 		return
 	end
-	if UserInputService:GetFocusedTextBox() then
+	if focused then
 		return
 	end
 	if input.KeyCode == Enum.KeyCode.F8 then
@@ -1310,6 +1470,16 @@ connect(UserInputService.InputBegan, function(input, gameProcessed)
 end)
 
 connect(UserInputService.InputEnded, function(input)
+	local focused = UserInputService:GetFocusedTextBox()
+	if mode == "record" and not focused then
+		if input.UserInputType == Enum.UserInputType.Keyboard and shouldRecordKey(input.KeyCode) then
+			recordInputState.keys[input.KeyCode.Name] = nil
+		elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+			recordInputState.mouse.MouseButton1 = nil
+		elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+			recordInputState.mouse.MouseButton2 = nil
+		end
+	end
 	if input.UserInputType == Enum.UserInputType.Keyboard then
 		if input.KeyCode == Enum.KeyCode.T and seekDir == -1 then
 			seekDir = 0
@@ -1341,6 +1511,9 @@ connect(RunService.RenderStepped, function(dt)
 
 	if mode == "record" then
 		if frozen then
+			if #frames > 0 then
+				applyFrame(playIndex, dt)
+			end
 			updateUi()
 			return
 		end
@@ -1393,6 +1566,7 @@ runtime.cleanup = function()
 	runtime.cleaning = true
 	pcall(stopRecord)
 	pcall(stopPlayback)
+	pcall(releasePlaybackInputs)
 	pcall(restoreTouch)
 	pcall(function()
 		UserInputService.MouseBehavior = startMouseBehavior
