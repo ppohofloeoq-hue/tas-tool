@@ -194,6 +194,7 @@ local lastRecordClock = 0
 local lastTrimmedCount = 0
 local logLines = {}
 local logLabel
+local commandBar
 local shiftLockState = false
 local mainFrame
 local timelineStep = 1 / TIMELINE_FPS
@@ -209,6 +210,7 @@ local settingsRecordModeBtn
 local settingsPlaySpeedBtn
 local settingsOverlayBtn
 local settingsCameraModeBtn
+local settingsLanguageBtn
 local inputOverlayFrame
 local inputOverlayLabel
 local shiftLockIndicator
@@ -252,6 +254,7 @@ local adminAliases = {}
 local adminCommandOrder = {}
 local adminSavedPositions = {}
 local adminPreviousPosition = nil
+local uiLanguage = "en"
 local runAdminCommand
 local refreshAdminPanel
 local populateAdminPanel
@@ -382,6 +385,46 @@ end
 local function clearLog()
 	logLines = {}
 	redrawLogLabel()
+end
+
+local TEXT = {
+	en = {
+		settings_inputs = "Inputs",
+		settings_overlay = "Overlay",
+		settings_playback = "Playback",
+		settings_camera = "Camera",
+		settings_rec_no_col = "RecNoCol",
+		settings_rec_mode = "RecMode",
+		settings_play_speed = "PlaySpeed",
+		settings_language = "Lang",
+		shiftlock = "ShiftLock REC",
+		status_format = "Mode: %s | Frozen: %s | RecFreeze: %s | ShiftLock: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | CameraMode: %s | TimelineFPS: %d | Inputs: %s | SeekSpeed: %.2f | PlaySpeed: %.2f | Blend: %.2f | Lang: %s\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  T/Y Seek  C/V Checkpoint  / Command  U UI  F2 Hide",
+		command_placeholder = "help | playspeed 1 | blend 0.6 | playbackmode frameblend | lang ru",
+		commands = "Commands:",
+		language_usage = "Usage: language <en|ru>",
+		language_set = "Language set to ",
+	},
+	ru = {
+		settings_inputs = "Ввод",
+		settings_overlay = "Оверлей",
+		settings_playback = "Плейбек",
+		settings_camera = "Камера",
+		settings_rec_no_col = "NoTouch",
+		settings_rec_mode = "Запись",
+		settings_play_speed = "Скорость",
+		settings_language = "Язык",
+		shiftlock = "ShiftLock ЗАП",
+		status_format = "Режим: %s | Пауза: %s | RecFreeze: %s | ShiftLock: %s | Кадр: %d/%d | Обрезано: %d | Запись: %s | Плейбек: %s | Камера: %s | TimelineFPS: %d | Ввод: %s | Seek: %.2f | PlaySpeed: %.2f | Blend: %.2f | Язык: %s\nF8 Запись  F10 Плейбек  F6 Сохранить  F7 Загрузить  E Freeze  F/G Кадр  T/Y Seek  C/V Чекпоинт  / Команда  U UI  F2 Скрыть",
+		command_placeholder = "help | playspeed 1 | blend 0.6 | playbackmode frameblend | lang en",
+		commands = "Команды:",
+		language_usage = "Использование: language <en|ru>",
+		language_set = "Язык переключен на ",
+	},
+}
+
+local function tr(key)
+	local pack = TEXT[uiLanguage] or TEXT.en
+	return pack[key] or TEXT.en[key] or tostring(key)
 end
 
 local function log(msg)
@@ -1212,28 +1255,31 @@ end
 
 local function refreshSettingsUI()
 	if settingsInputsBtn then
-		settingsInputsBtn.Text = "Inputs: " .. (virtualInputPlaybackEnabled and "ON" or "OFF")
+		settingsInputsBtn.Text = tr("settings_inputs") .. ": " .. (virtualInputPlaybackEnabled and "ON" or "OFF")
 		settingsInputsBtn.BackgroundColor3 = virtualInputPlaybackEnabled and Color3.fromRGB(51, 96, 78) or Color3.fromRGB(92, 67, 67)
 	end
 	if settingsPlaybackModeBtn then
-		settingsPlaybackModeBtn.Text = "Playback: " .. tostring(playbackMode)
+		settingsPlaybackModeBtn.Text = tr("settings_playback") .. ": " .. tostring(playbackMode)
 	end
 	if settingsCameraModeBtn then
-		settingsCameraModeBtn.Text = "Camera: " .. tostring(cameraMode)
+		settingsCameraModeBtn.Text = tr("settings_camera") .. ": " .. tostring(cameraMode)
 	end
 	if settingsRecordNoColBtn then
-		settingsRecordNoColBtn.Text = "RecNoCol: " .. (recordNoCollisionEnabled and "ON" or "OFF")
+		settingsRecordNoColBtn.Text = tr("settings_rec_no_col") .. ": " .. (recordNoCollisionEnabled and "ON" or "OFF")
 		settingsRecordNoColBtn.BackgroundColor3 = recordNoCollisionEnabled and Color3.fromRGB(98, 86, 56) or Color3.fromRGB(68, 93, 124)
 	end
 	if settingsRecordModeBtn then
-		settingsRecordModeBtn.Text = "RecMode: " .. tostring(recordMode)
+		settingsRecordModeBtn.Text = tr("settings_rec_mode") .. ": " .. tostring(recordMode)
 	end
 	if settingsPlaySpeedBtn then
-		settingsPlaySpeedBtn.Text = string.format("PlaySpeed: %.2f", playbackSpeed)
+		settingsPlaySpeedBtn.Text = string.format("%s: %.2f", tr("settings_play_speed"), playbackSpeed)
 	end
 	if settingsOverlayBtn then
-		settingsOverlayBtn.Text = "Overlay: " .. (inputOverlayEnabled and "ON" or "OFF")
+		settingsOverlayBtn.Text = tr("settings_overlay") .. ": " .. (inputOverlayEnabled and "ON" or "OFF")
 		settingsOverlayBtn.BackgroundColor3 = inputOverlayEnabled and Color3.fromRGB(72, 105, 146) or Color3.fromRGB(90, 67, 67)
+	end
+	if settingsLanguageBtn then
+		settingsLanguageBtn.Text = tr("settings_language") .. ": " .. string.upper(uiLanguage)
 	end
 end
 
@@ -1257,7 +1303,7 @@ local function statusText()
 	local recordFreezeText = (mode == "record" and frozen and "ON") or "OFF"
 	local shiftStateText = isShiftLockActive() and "ON" or "OFF"
 	return string.format(
-		"Mode: %s | Frozen: %s | RecFreeze: %s | ShiftLock: %s | Frame: %d/%d | Trimmed: %d | RecordMode: %s | PlaybackMode: %s | CameraMode: %s | TimelineFPS: %d | Inputs: %s | SeekSpeed: %.2f | PlaySpeed: %.2f | Blend: %.2f\nF8 Rec  F10 Play  F6 Save  F7 Load  E Freeze  F/G Step  T/Y Seek  C/V Checkpoint  / Command  U UI  F2 Hide",
+		tr("status_format"),
 		mode,
 		tostring(frozen),
 		recordFreezeText,
@@ -1272,7 +1318,8 @@ local function statusText()
 		virtualInputPlaybackEnabled and "ON" or "OFF",
 		seekSpeed,
 		playbackSpeed,
-		blendAlphaScale
+		blendAlphaScale,
+		uiLanguage
 	)
 end
 
@@ -1335,7 +1382,7 @@ shiftLockIndicator.BorderSizePixel = 0
 shiftLockIndicator.TextColor3 = Color3.fromRGB(255, 236, 236)
 shiftLockIndicator.Font = Enum.Font.GothamSemibold
 shiftLockIndicator.TextSize = 12
-shiftLockIndicator.Text = "ShiftLock REC: OFF"
+shiftLockIndicator.Text = tr("shiftlock") .. ": OFF"
 shiftLockIndicator.Parent = topBar
 
 local shiftCorner = Instance.new("UICorner")
@@ -1392,7 +1439,7 @@ local labelCorner = Instance.new("UICorner")
 labelCorner.CornerRadius = UDim.new(0, 8)
 labelCorner.Parent = label
 
-local commandBar = Instance.new("TextBox")
+commandBar = Instance.new("TextBox")
 commandBar.Size = UDim2.new(1, -20, 0, 30)
 commandBar.Position = UDim2.fromOffset(10, 148)
 commandBar.BackgroundColor3 = Color3.fromRGB(26, 33, 45)
@@ -1401,7 +1448,7 @@ commandBar.TextColor3 = Color3.fromRGB(238, 244, 255)
 commandBar.BorderSizePixel = 0
 commandBar.TextXAlignment = Enum.TextXAlignment.Left
 commandBar.Font = Enum.Font.Code
-commandBar.PlaceholderText = "help | playspeed 1 | blend 0.6 | playbackmode frameblend"
+commandBar.PlaceholderText = tr("command_placeholder")
 commandBar.TextSize = 15
 commandBar.ClearTextOnFocus = false
 commandBar.Text = ""
@@ -1426,7 +1473,7 @@ settingsLayout.Parent = settingsFrame
 
 local function makeSettingButton()
 	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.fromOffset(100, 32)
+	btn.Size = UDim2.fromOffset(88, 32)
 	btn.BackgroundColor3 = Color3.fromRGB(45, 58, 79)
 	btn.BorderSizePixel = 0
 	btn.TextColor3 = Color3.fromRGB(230, 238, 255)
@@ -1453,6 +1500,28 @@ settingsRecordModeBtn = makeSettingButton()
 settingsRecordModeBtn.Parent = settingsFrame
 settingsPlaySpeedBtn = makeSettingButton()
 settingsPlaySpeedBtn.Parent = settingsFrame
+settingsLanguageBtn = makeSettingButton()
+settingsLanguageBtn.Parent = settingsFrame
+
+local function applyLanguage(newLanguage, silent)
+	local normalized = string.lower(tostring(newLanguage or ""))
+	if normalized ~= "en" and normalized ~= "ru" then
+		return false
+	end
+	uiLanguage = normalized
+	if commandBar then
+		commandBar.PlaceholderText = tr("command_placeholder")
+	end
+	lastShiftIndicatorState = nil
+	refreshSettingsUI()
+	if updateUI then
+		updateUI()
+	end
+	if not silent then
+		log(tr("language_set") .. uiLanguage)
+	end
+	return true
+end
 
 logLabel = Instance.new("TextLabel")
 logLabel.Size = UDim2.new(1, -20, 1, -190)
@@ -1733,143 +1802,6 @@ inputOverlayLabel.TextColor3 = Color3.fromRGB(208, 220, 242)
 inputOverlayLabel.Text = "Playback Input Overlay"
 inputOverlayLabel.Parent = inputOverlayFrame
 
-for _, overlayGui in ipairs(inputOverlayFrame:GetDescendants()) do
-	if overlayGui:IsA("GuiObject") then
-		overlayGui.ZIndex = 16
-	end
-end
-inputOverlayFrame.ZIndex = 15
-
-local loadingOverlay = Instance.new("Frame")
-loadingOverlay.Size = UDim2.fromScale(1, 1)
-loadingOverlay.BackgroundColor3 = Color3.fromRGB(14, 18, 25)
-loadingOverlay.BackgroundTransparency = 0.08
-loadingOverlay.BorderSizePixel = 0
-loadingOverlay.ZIndex = 100
-loadingOverlay.Parent = gui
-
-local loadingPanel = Instance.new("Frame")
-loadingPanel.Size = UDim2.fromOffset(440, 150)
-loadingPanel.AnchorPoint = Vector2.new(0.5, 0.5)
-loadingPanel.Position = UDim2.fromScale(0.5, 0.5)
-loadingPanel.BackgroundColor3 = Color3.fromRGB(28, 36, 50)
-loadingPanel.BorderSizePixel = 0
-loadingPanel.ZIndex = 101
-loadingPanel.Parent = loadingOverlay
-
-local loadCorner = Instance.new("UICorner")
-loadCorner.CornerRadius = UDim.new(0, 8)
-loadCorner.Parent = loadingPanel
-
-local loadStroke = Instance.new("UIStroke")
-loadStroke.Color = Color3.fromRGB(129, 166, 230)
-loadStroke.Thickness = 1.5
-loadStroke.Parent = loadingPanel
-
-local loadTitle = Instance.new("TextLabel")
-loadTitle.Size = UDim2.new(1, -24, 0, 38)
-loadTitle.Position = UDim2.fromOffset(12, 10)
-loadTitle.BackgroundTransparency = 1
-loadTitle.Text = "Initializing TAS Tool"
-loadTitle.TextColor3 = Color3.fromRGB(230, 238, 255)
-loadTitle.Font = Enum.Font.GothamBold
-loadTitle.TextSize = 20
-loadTitle.TextXAlignment = Enum.TextXAlignment.Left
-loadTitle.ZIndex = 101
-loadTitle.Parent = loadingPanel
-
-local loadHint = Instance.new("TextLabel")
-loadHint.Size = UDim2.new(1, -24, 0, 22)
-loadHint.Position = UDim2.fromOffset(12, 52)
-loadHint.BackgroundTransparency = 1
-loadHint.Text = "Preparing timeline..."
-loadHint.TextColor3 = Color3.fromRGB(187, 206, 236)
-loadHint.Font = Enum.Font.Gotham
-loadHint.TextSize = 14
-loadHint.TextXAlignment = Enum.TextXAlignment.Left
-loadHint.ZIndex = 101
-loadHint.Parent = loadingPanel
-
-local loadPercent = Instance.new("TextLabel")
-loadPercent.Size = UDim2.fromOffset(56, 22)
-loadPercent.Position = UDim2.new(1, -68, 0, 52)
-loadPercent.BackgroundTransparency = 1
-loadPercent.Text = "0%"
-loadPercent.TextColor3 = Color3.fromRGB(201, 219, 248)
-loadPercent.Font = Enum.Font.GothamSemibold
-loadPercent.TextSize = 14
-loadPercent.TextXAlignment = Enum.TextXAlignment.Right
-loadPercent.ZIndex = 101
-loadPercent.Parent = loadingPanel
-
-local loadTrack = Instance.new("Frame")
-loadTrack.Size = UDim2.new(1, -24, 0, 14)
-loadTrack.Position = UDim2.fromOffset(12, 94)
-loadTrack.BackgroundColor3 = Color3.fromRGB(58, 70, 92)
-loadTrack.BorderSizePixel = 0
-loadTrack.ZIndex = 101
-loadTrack.Parent = loadingPanel
-
-local loadTrackCorner = Instance.new("UICorner")
-loadTrackCorner.CornerRadius = UDim.new(0, 7)
-loadTrackCorner.Parent = loadTrack
-
-local loadFill = Instance.new("Frame")
-loadFill.Size = UDim2.fromScale(0, 1)
-loadFill.BackgroundColor3 = Color3.fromRGB(139, 201, 255)
-loadFill.BorderSizePixel = 0
-loadFill.ZIndex = 102
-loadFill.Parent = loadTrack
-
-local loadFillCorner = Instance.new("UICorner")
-loadFillCorner.CornerRadius = UDim.new(0, 7)
-loadFillCorner.Parent = loadFill
-
-local function playIntroAnimation()
-	mainFrame.Position = UDim2.fromOffset(16, -360)
-	mainFrame.BackgroundTransparency = 0.35
-	mainFrame.Rotation = -2
-	local hints = {
-		"Preparing timeline...",
-		"Configuring playback core...",
-		"Syncing interface...",
-		"Almost ready...",
-	}
-
-	local fillTween = TweenService:Create(
-		loadFill,
-		TweenInfo.new(1.05, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-		{ Size = UDim2.fromScale(1, 1) }
-	)
-	fillTween:Play()
-
-	local startTick = tick()
-	while fillTween.PlaybackState == Enum.PlaybackState.Playing do
-		local progress = math.clamp((tick() - startTick) / 1.05, 0, 1)
-		local idx = math.clamp(math.floor(progress * #hints) + 1, 1, #hints)
-		loadHint.Text = hints[idx]
-		loadPercent.Text = tostring(math.floor(progress * 100)) .. "%"
-		task.wait(0.03)
-	end
-	loadPercent.Text = "100%"
-
-	local panelTween = TweenService:Create(
-		mainFrame,
-		TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-		{ Position = UDim2.fromOffset(16, 12), BackgroundTransparency = 0, Rotation = 0 }
-	)
-	panelTween:Play()
-
-	local overlayFade = TweenService:Create(
-		loadingOverlay,
-		TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-		{ BackgroundTransparency = 1 }
-	)
-	overlayFade:Play()
-	overlayFade.Completed:Wait()
-	loadingOverlay:Destroy()
-end
-
 local function cyclePlaybackMode()
 	local nextMode = playbackMode
 	if playbackMode == "ghost" then
@@ -1956,6 +1888,10 @@ connect(settingsPlaySpeedBtn.MouseButton1Click, function()
 	refreshSettingsUI()
 end)
 
+connect(settingsLanguageBtn.MouseButton1Click, function()
+	applyLanguage(uiLanguage == "en" and "ru" or "en")
+end)
+
 connect(settingsToggleBtn.MouseButton1Click, function()
 	settingsOpen = not settingsOpen
 	applySettingsVisibility()
@@ -2001,7 +1937,6 @@ else
 	warn("[TAS Lite] Could not find a UI parent")
 	return
 end
-playIntroAnimation()
 applySettingsVisibility()
 refreshSettingsUI()
 
@@ -2013,7 +1948,7 @@ updateUI = function()
 	if shiftLockIndicator then
 		local shiftOn = isShiftLockActive()
 		if lastShiftIndicatorState == nil or shiftOn ~= lastShiftIndicatorState then
-			shiftLockIndicator.Text = "ShiftLock REC: " .. (shiftOn and "ON" or "OFF")
+			shiftLockIndicator.Text = tr("shiftlock") .. ": " .. (shiftOn and "ON" or "OFF")
 			if shiftOn then
 				shiftLockIndicator.BackgroundColor3 = Color3.fromRGB(52, 112, 82)
 				shiftLockIndicator.TextColor3 = Color3.fromRGB(210, 255, 231)
@@ -4529,12 +4464,13 @@ connect(UIS.JumpRequest, function()
 end)
 
 local function commandHelp()
-	log("Commands:")
+	log(tr("commands"))
 	log("help")
 	log("erase")
 	log("setspeed <number>")
 	log("playspeed <number>")
 	log("blend <0.05..1>")
+	log("language/lang <en|ru>")
 	log("inputs <on|off>")
 	log("overlay <on|off>")
 	log("recordnocollision <on|off>")
@@ -4604,6 +4540,13 @@ local function runCommand(raw)
 		end
 		blendAlphaScale = newBlend
 		log("Blend scale set to " .. string.format("%.2f", blendAlphaScale))
+		return
+	end
+
+	if cmd == "language" or cmd == "lang" then
+		if not applyLanguage(args[2]) then
+			log(tr("language_usage"))
+		end
 		return
 	end
 
@@ -5128,3 +5071,4 @@ log("Admin panel ready: " .. tostring(#adminCommandOrder) .. " commands (button:
 log("Press F2 to force hide/show GUI")
 log("Type '/' to open command bar, then use 'help'")
 updateUI()
+
