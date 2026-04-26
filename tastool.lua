@@ -136,6 +136,9 @@ local playbackInputState = {
 	keys = {},
 	mouse = {},
 }
+local humanoidAutoRotateState = {}
+local playbackAnimationTracks = {}
+local captureAnimations
 
 local gui
 local rootFrame
@@ -667,6 +670,17 @@ local function releasePlaybackInputs()
 	playbackInputState = { keys = {}, mouse = {} }
 end
 
+local function restoreHumanoidAutoRotate()
+	for humanoid, value in pairs(humanoidAutoRotateState) do
+		if humanoid and humanoid.Parent then
+			pcall(function()
+				humanoid.AutoRotate = value
+			end)
+		end
+		humanoidAutoRotateState[humanoid] = nil
+	end
+end
+
 local function applyVirtualInputs(inputData)
 	if not VirtualInputManager then
 		return
@@ -784,6 +798,7 @@ local function captureFrame()
 		inputs = copyInputState(),
 		health = humanoid and round(humanoid.Health) or nil,
 		state = humanoid and humanoid:GetState().Name or nil,
+		animations = captureAnimations(humanoid),
 	}
 	if humanoid then
 		frame.move = vecToTable(humanoid.MoveDirection)
@@ -807,6 +822,139 @@ local function humanoidStateFromString(value)
 	return nil
 end
 
+captureAnimations = function(humanoid)
+	local result = {}
+	if not humanoid then
+		return result
+	end
+	local ok, tracks = pcall(function()
+		return humanoid:GetPlayingAnimationTracks()
+	end)
+	if not ok or type(tracks) ~= "table" then
+		return result
+	end
+	for _, track in ipairs(tracks) do
+		local animationId = nil
+		pcall(function()
+			if track.Animation then
+				animationId = track.Animation.AnimationId
+			end
+		end)
+		if type(animationId) == "string" and animationId ~= "" then
+			local item = {
+				id = animationId,
+				time = 0,
+				speed = 1,
+				weight = 1,
+				priority = nil,
+				looped = false,
+			}
+			pcall(function()
+				item.time = round(track.TimePosition or 0)
+			end)
+			pcall(function()
+				item.speed = round(track.Speed or 1)
+			end)
+			pcall(function()
+				item.weight = round(track.WeightCurrent or 1)
+			end)
+			pcall(function()
+				item.priority = track.Priority and track.Priority.Name or nil
+			end)
+			pcall(function()
+				item.looped = track.Looped == true
+			end)
+			table.insert(result, item)
+		end
+	end
+	return result
+end
+
+local function clearPlaybackAnimations(fadeTime)
+	for id, track in pairs(playbackAnimationTracks) do
+		if track then
+			pcall(function()
+				track:Stop(fadeTime or 0.08)
+			end)
+		end
+		playbackAnimationTracks[id] = nil
+	end
+end
+
+local function applyRecordedAnimations(humanoid, frame, frozenPreview)
+	if not humanoid or type(frame) ~= "table" then
+		return
+	end
+	local animations = type(frame.animations) == "table" and frame.animations or {}
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+	if not animator then
+		pcall(function()
+			animator = Instance.new("Animator")
+			animator.Parent = humanoid
+		end)
+	end
+	if not animator then
+		return
+	end
+
+	local active = {}
+	for _, item in ipairs(animations) do
+		local id = tostring(item.id or "")
+		if id ~= "" then
+			active[id] = true
+			local track = playbackAnimationTracks[id]
+			if not track then
+				local animation = Instance.new("Animation")
+				animation.AnimationId = id
+				local ok, loaded = pcall(function()
+					return animator:LoadAnimation(animation)
+				end)
+				animation:Destroy()
+				if ok and loaded then
+					track = loaded
+					playbackAnimationTracks[id] = track
+					pcall(function()
+						if item.priority and Enum.AnimationPriority[item.priority] then
+							track.Priority = Enum.AnimationPriority[item.priority]
+						end
+					end)
+				end
+			end
+			if track then
+				pcall(function()
+					if not track.IsPlaying then
+						track:Play(0.05, clamp(tonumber(item.weight) or 1, 0, 1), frozenPreview and 0 or (tonumber(item.speed) or 1))
+					end
+					track.TimePosition = math.max(0, tonumber(item.time) or 0)
+					track:AdjustWeight(clamp(tonumber(item.weight) or 1, 0, 1), 0.03)
+					track:AdjustSpeed(frozenPreview and 0 or (tonumber(item.speed) or 1))
+				end)
+			end
+		end
+	end
+	pcall(function()
+		for _, liveTrack in ipairs(humanoid:GetPlayingAnimationTracks()) do
+			local liveId = ""
+			pcall(function()
+				if liveTrack.Animation then
+					liveId = liveTrack.Animation.AnimationId
+				end
+			end)
+			if liveId ~= "" and not active[liveId] and not playbackAnimationTracks[liveId] then
+				liveTrack:Stop(0.05)
+			end
+		end
+	end)
+	for id, track in pairs(playbackAnimationTracks) do
+		if not active[id] then
+			pcall(function()
+				track:Stop(0.08)
+			end)
+			playbackAnimationTracks[id] = nil
+		end
+	end
+end
+
 local function sanitizeFrame(raw)
 	if type(raw) ~= "table" then
 		return nil
@@ -826,6 +974,7 @@ local function sanitizeFrame(raw)
 		inputs = type(raw.inputs) == "table" and raw.inputs or { keys = {}, mouse = {} },
 		health = tonumber(raw.health),
 		state = raw.state,
+		animations = type(raw.animations) == "table" and raw.animations or {},
 		move = vecToTable(tableToVec(raw.move)),
 		jump = raw.jump == true,
 		sit = raw.sit == true,
@@ -860,6 +1009,7 @@ local function interpolateFrame(a, b, alpha)
 		blended.jump = b.jump == true
 		blended.sit = b.sit == true
 		blended.state = b.state
+		blended.animations = b.animations
 	end
 	return blended
 end
@@ -917,6 +1067,12 @@ local function applyRootBlended(root, frame, modeName)
 		applyRootExact(root, frame)
 		return
 	end
+	if modeName == "frameblend" then
+		root.CFrame = target
+		root.AssemblyLinearVelocity = root.AssemblyLinearVelocity:Lerp(tableToVec(frame.vel), clamp(FRAMEBLEND_VELOCITY_BLEND * blendScale, 0.01, 1))
+		root.AssemblyAngularVelocity = root.AssemblyAngularVelocity:Lerp(tableToVec(frame.ang), clamp(FRAMEBLEND_ANGULAR_BLEND * blendScale, 0.01, 1))
+		return
+	end
 
 	local positionAlpha = FRAMEBLEND_POSITION_ALPHA
 	local rotationAlpha = FRAMEBLEND_ROTATION_ALPHA
@@ -962,6 +1118,12 @@ local function applyFrameData(frame, index, dt)
 	setShiftLock(frameShiftLock)
 	if humanoid then
 		pcall(function()
+			if mode == "play" or frozen then
+				if humanoidAutoRotateState[humanoid] == nil then
+					humanoidAutoRotateState[humanoid] = humanoid.AutoRotate
+				end
+				humanoid.AutoRotate = false
+			end
 			humanoid.Sit = frame.sit == true
 			humanoid.Jump = frame.jump == true
 			humanoid:Move(tableToVec(frame.move), false)
@@ -971,6 +1133,9 @@ local function applyFrameData(frame, index, dt)
 				lastPlaybackHumanoidState = state
 			end
 		end)
+		if mode == "play" or frozen then
+			applyRecordedAnimations(humanoid, frame, frozen)
+		end
 	end
 	if frozen or effectiveMode == "ghost" then
 		applyRootExact(root, frame)
@@ -1023,6 +1188,8 @@ local function stopPlayback()
 	playbackShiftOverride = nil
 	lastPlaybackHumanoidState = nil
 	releasePlaybackInputs()
+	clearPlaybackAnimations(0.08)
+	restoreHumanoidAutoRotate()
 	pcall(function()
 		camera.CameraType = startCameraType
 		camera.CameraSubject = startCameraSubject
@@ -1078,6 +1245,8 @@ local function setFrozen(value)
 	end
 	frozen = value and true or false
 	if mode == "record" and not frozen then
+		clearPlaybackAnimations(0.08)
+		restoreHumanoidAutoRotate()
 		pcall(function()
 			camera.CameraType = startCameraType
 			camera.CameraSubject = startCameraSubject
@@ -1567,6 +1736,8 @@ runtime.cleanup = function()
 	pcall(stopRecord)
 	pcall(stopPlayback)
 	pcall(releasePlaybackInputs)
+	pcall(clearPlaybackAnimations)
+	pcall(restoreHumanoidAutoRotate)
 	pcall(restoreTouch)
 	pcall(function()
 		UserInputService.MouseBehavior = startMouseBehavior
