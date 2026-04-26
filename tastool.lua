@@ -114,13 +114,16 @@ local playbackSpeed = PLAYBACK_SPEED
 local seekSpeed = 1
 local blendScale = 1
 local recordNoCollision = false
-local shiftLockState = false
+local shiftLockState = (startMouseBehavior == Enum.MouseBehavior.LockCenter)
 local checkpoints = {}
 local quickCheckpointName = "quick"
 local logLines = {}
 local language = "ru"
 local savedTouch = {}
 local lastAppliedFrame = nil
+local recordBranchPending = false
+local playbackShiftOverride = nil
+local lastPlaybackHumanoidState = nil
 
 local gui
 local rootFrame
@@ -581,8 +584,20 @@ local function setShiftLock(enabled)
 end
 
 local function captureShiftLock()
-	shiftLockState = (UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter)
 	return shiftLockState
+end
+
+local function toggleShiftLockManual()
+	if mode == "play" then
+		local base = playbackShiftOverride
+		if base == nil and frames[playIndex] then
+			base = frames[playIndex].shiftlock == true
+		end
+		playbackShiftOverride = not (base == true)
+		setShiftLock(playbackShiftOverride)
+	else
+		setShiftLock(not shiftLockState)
+	end
 end
 
 local function setCharacterTouch(enabled)
@@ -632,7 +647,7 @@ local function captureFrame()
 		cam = cfToTable(camera.CFrame),
 		shiftlock = captureShiftLock(),
 		health = humanoid and round(humanoid.Health) or nil,
-		state = humanoid and tostring(humanoid:GetState()) or nil,
+		state = humanoid and humanoid:GetState().Name or nil,
 	}
 	if humanoid then
 		frame.move = vecToTable(humanoid.MoveDirection)
@@ -640,6 +655,20 @@ local function captureFrame()
 		frame.sit = humanoid.Sit == true
 	end
 	return frame
+end
+
+local function humanoidStateFromString(value)
+	if type(value) ~= "string" then
+		return nil
+	end
+	local name = value:match("([^%.]+)$") or value
+	local ok, enumValue = pcall(function()
+		return Enum.HumanoidStateType[name]
+	end)
+	if ok then
+		return enumValue
+	end
+	return nil
 end
 
 local function sanitizeFrame(raw)
@@ -664,6 +693,37 @@ local function sanitizeFrame(raw)
 		jump = raw.jump == true,
 		sit = raw.sit == true,
 	}
+end
+
+local function interpolateFrame(a, b, alpha)
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return a
+	end
+	alpha = clamp(tonumber(alpha) or 0, 0, 1)
+	local acf = tableToCf(a.cf)
+	local bcf = tableToCf(b.cf)
+	local acam = tableToCf(a.cam)
+	local bcam = tableToCf(b.cam)
+	local blended = {}
+	for k, v in pairs(a) do
+		blended[k] = v
+	end
+	if acf and bcf then
+		blended.cf = cfToTable(acf:Lerp(bcf, alpha))
+	end
+	if acam and bcam then
+		blended.cam = cfToTable(acam:Lerp(bcam, alpha))
+	end
+	blended.vel = vecToTable(tableToVec(a.vel):Lerp(tableToVec(b.vel), alpha))
+	blended.ang = vecToTable(tableToVec(a.ang):Lerp(tableToVec(b.ang), alpha))
+	blended.move = vecToTable(tableToVec(a.move):Lerp(tableToVec(b.move), alpha))
+	if alpha >= 0.5 then
+		blended.shiftlock = b.shiftlock == true
+		blended.jump = b.jump == true
+		blended.sit = b.sit == true
+		blended.state = b.state
+	end
+	return blended
 end
 
 local function addFrame()
@@ -742,9 +802,7 @@ local function applyRootBlended(root, frame, modeName)
 	root.AssemblyAngularVelocity = root.AssemblyAngularVelocity:Lerp(tableToVec(frame.ang), angularAlpha)
 end
 
-local function applyFrame(index, dt)
-	index = clamp(math.floor(index), 1, math.max(#frames, 1))
-	local frame = frames[index]
+local function applyFrameData(frame, index, dt)
 	if not frame then
 		return
 	end
@@ -752,13 +810,25 @@ local function applyFrame(index, dt)
 	if not root then
 		return
 	end
-	playIndex = index
+	if index then
+		playIndex = clamp(math.floor(index), 1, math.max(#frames, 1))
+	end
 	local effectiveMode = normalizePlaybackMode(playbackMode)
-	setShiftLock(frame.shiftlock == true)
+	local frameShiftLock = frame.shiftlock == true
+	if mode == "play" and playbackShiftOverride ~= nil then
+		frameShiftLock = playbackShiftOverride == true
+	end
+	setShiftLock(frameShiftLock)
 	if humanoid then
 		pcall(function()
 			humanoid.Sit = frame.sit == true
 			humanoid.Jump = frame.jump == true
+			humanoid:Move(tableToVec(frame.move), false)
+			local state = humanoidStateFromString(frame.state)
+			if state and state ~= Enum.HumanoidStateType.Dead and state ~= lastPlaybackHumanoidState then
+				humanoid:ChangeState(state)
+				lastPlaybackHumanoidState = state
+			end
 		end)
 	end
 	if frozen or effectiveMode == "ghost" then
@@ -768,6 +838,11 @@ local function applyFrame(index, dt)
 	end
 	applyCamera(frame, dt)
 	lastAppliedFrame = frame
+end
+
+local function applyFrame(index, dt)
+	index = clamp(math.floor(index), 1, math.max(#frames, 1))
+	applyFrameData(frames[index], index, dt)
 end
 
 local function stopRecord()
@@ -788,6 +863,7 @@ local function startRecord()
 		frames = {}
 		playIndex = 1
 	end
+	recordBranchPending = false
 	mode = "record"
 	frozen = false
 	recordAccumulator = 0
@@ -802,6 +878,8 @@ local function stopPlayback()
 	end
 	mode = "idle"
 	frozen = false
+	playbackShiftOverride = nil
+	lastPlaybackHumanoidState = nil
 	pcall(function()
 		camera.CameraType = startCameraType
 		camera.CameraSubject = startCameraSubject
@@ -819,6 +897,8 @@ local function startPlayback()
 	end
 	mode = "play"
 	frozen = false
+	playbackShiftOverride = nil
+	lastPlaybackHumanoidState = nil
 	playIndex = 1
 	playbackAccumulator = 0
 	cameraMode = normalizeCameraMode(cameraMode)
@@ -844,6 +924,14 @@ local function togglePlayback()
 end
 
 local function setFrozen(value)
+	if mode == "record" and frozen and not value and recordBranchPending then
+		for i = #frames, playIndex + 1, -1 do
+			frames[i] = nil
+		end
+		recordAccumulator = 0
+		recordBranchPending = false
+		log("Record branch trimmed to frame " .. tostring(playIndex))
+	end
 	frozen = value and true or false
 	log(tr("frozen") .. ": " .. (frozen and "ON" or "OFF"))
 end
@@ -861,6 +949,7 @@ local function stepFrame(delta)
 		playIndex = clamp(playIndex + delta, 1, #frames)
 		if frames[playIndex] then
 			applyFrame(playIndex, timelineStep)
+			recordBranchPending = true
 		end
 	end
 end
@@ -882,6 +971,9 @@ local function gotoCheckpoint(name)
 	playIndex = clamp(index, 1, math.max(#frames, 1))
 	if #frames > 0 then
 		applyFrame(playIndex, timelineStep)
+		if mode == "record" then
+			recordBranchPending = true
+		end
 	end
 	log("Checkpoint goto: " .. name .. " -> " .. tostring(playIndex))
 end
@@ -1183,6 +1275,8 @@ connect(UserInputService.InputBegan, function(input, gameProcessed)
 		toggleRecord()
 	elseif input.KeyCode == Enum.KeyCode.F10 then
 		togglePlayback()
+	elseif input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+		toggleShiftLockManual()
 	elseif input.KeyCode == Enum.KeyCode.F6 then
 		saveReplay()
 	elseif input.KeyCode == Enum.KeyCode.F7 then
@@ -1195,12 +1289,12 @@ connect(UserInputService.InputBegan, function(input, gameProcessed)
 		stepFrame(1)
 	elseif input.KeyCode == Enum.KeyCode.T then
 		seekDir = -1
-		if mode == "play" and not frozen then
+		if (mode == "play" or mode == "record") and not frozen then
 			setFrozen(true)
 		end
 	elseif input.KeyCode == Enum.KeyCode.Y then
 		seekDir = 1
-		if mode == "play" and not frozen then
+		if (mode == "play" or mode == "record") and not frozen then
 			setFrozen(true)
 		end
 	elseif input.KeyCode == Enum.KeyCode.C then
@@ -1240,6 +1334,9 @@ connect(RunService.RenderStepped, function(dt)
 	if seekDir ~= 0 and frozen and #frames > 0 then
 		local step = math.max(1, math.floor(seekSpeed))
 		applyFrame(clamp(playIndex + seekDir * step, 1, #frames), dt)
+		if mode == "record" then
+			recordBranchPending = true
+		end
 	end
 
 	if mode == "record" then
@@ -1276,7 +1373,11 @@ connect(RunService.RenderStepped, function(dt)
 			steps += 1
 		end
 		if mode == "play" then
-			applyFrame(playIndex, dt)
+			local renderFrame = frames[playIndex]
+			if playbackMode ~= "ghost" and frames[playIndex + 1] then
+				renderFrame = interpolateFrame(frames[playIndex], frames[playIndex + 1], playbackAccumulator / timelineStep)
+			end
+			applyFrameData(renderFrame, playIndex, dt)
 		end
 	else
 		captureShiftLock()
