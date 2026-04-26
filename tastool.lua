@@ -103,8 +103,6 @@ local frames = {}
 local playIndex = 1
 local recordAccumulator = 0
 local playbackAccumulator = 0
-local recordClock = os.clock()
-local playbackClock = os.clock()
 local frozen = false
 local seekDir = 0
 local uiVisible = true
@@ -793,7 +791,6 @@ local function startRecord()
 	mode = "record"
 	frozen = false
 	recordAccumulator = 0
-	recordClock = os.clock()
 	applyRecordNoCollision()
 	addFrame()
 	log(tr("record_started") .. " [" .. recordMode .. "]")
@@ -824,7 +821,6 @@ local function startPlayback()
 	frozen = false
 	playIndex = 1
 	playbackAccumulator = 0
-	playbackClock = os.clock()
 	cameraMode = normalizeCameraMode(cameraMode)
 	playbackMode = normalizePlaybackMode(playbackMode)
 	applyFrame(1, timelineStep)
@@ -1251,10 +1247,7 @@ connect(RunService.RenderStepped, function(dt)
 			updateUi()
 			return
 		end
-		local now = os.clock()
-		local delta = now - recordClock
-		recordClock = now
-		recordAccumulator += clamp(delta, 0, 0.25)
+		recordAccumulator += clamp(dt, 0, 0.25)
 		local steps = 0
 		while recordAccumulator >= timelineStep and steps < RECORD_MAX_STEPS_PER_RENDER do
 			addFrame()
@@ -1268,10 +1261,7 @@ connect(RunService.RenderStepped, function(dt)
 			updateUi()
 			return
 		end
-		local now = os.clock()
-		local delta = now - playbackClock
-		playbackClock = now
-		playbackAccumulator += clamp(delta * playbackSpeed, 0, PLAYBACK_MAX_ACCUMULATOR)
+		playbackAccumulator += clamp(dt * playbackSpeed, 0, PLAYBACK_MAX_ACCUMULATOR)
 		if playbackAccumulator > PLAYBACK_MAX_ACCUMULATOR then
 			playbackAccumulator = PLAYBACK_MAX_ACCUMULATOR
 		end
