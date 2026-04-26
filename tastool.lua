@@ -673,7 +673,9 @@ local function addFrame()
 	if frame then
 		table.insert(frames, frame)
 		playIndex = #frames
+		return true
 	end
+	return false
 end
 
 local function applyCamera(frame, dt)
@@ -793,6 +795,7 @@ local function startRecord()
 	recordAccumulator = 0
 	recordClock = os.clock()
 	applyRecordNoCollision()
+	addFrame()
 	log(tr("record_started") .. " [" .. recordMode .. "]")
 end
 
@@ -819,11 +822,12 @@ local function startPlayback()
 	end
 	mode = "play"
 	frozen = false
-	playIndex = clamp(playIndex, 1, #frames)
+	playIndex = 1
 	playbackAccumulator = 0
 	playbackClock = os.clock()
 	cameraMode = normalizeCameraMode(cameraMode)
 	playbackMode = normalizePlaybackMode(playbackMode)
+	applyFrame(1, timelineStep)
 	log(tr("play_started") .. " [" .. playbackMode .. "]")
 end
 
