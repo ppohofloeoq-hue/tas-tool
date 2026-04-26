@@ -839,27 +839,14 @@ local function restoreTouch()
 	savedTouch = {}
 end
 
-local function zeroRootVelocity()
-	local _, _, root = getCharacterParts()
-	if root then
-		pcall(function()
-			root.AssemblyLinearVelocity = Vector3.zero
-			root.AssemblyAngularVelocity = Vector3.zero
-		end)
-	end
-end
-
 local function refreshCurrentRecordFrame()
 	if mode ~= "record" or #frames <= 0 then
 		return
 	end
 	local snapshot = captureFrame()
 	if snapshot then
-		snapshot.vel = { 0, 0, 0 }
-		snapshot.ang = { 0, 0, 0 }
 		frames[playIndex] = snapshot
 	end
-	zeroRootVelocity()
 end
 
 captureFrame = function()
@@ -1319,16 +1306,17 @@ end
 
 local function setFrozen(value)
 	if mode == "record" and frozen and not value and recordBranchPending then
+		refreshCurrentRecordFrame()
 		for i = #frames, playIndex + 1, -1 do
 			frames[i] = nil
 		end
 		recordAccumulator = 0
+		playIndex = #frames
 		recordBranchPending = false
 		log("Record branch trimmed to frame " .. tostring(playIndex))
 	end
 	frozen = value and true or false
 	if mode == "record" and not frozen then
-		refreshCurrentRecordFrame()
 		clearPlaybackAnimations(0.08)
 		restoreHumanoidAutoRotate()
 		restoreAnimateScripts()
