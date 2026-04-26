@@ -138,7 +138,10 @@ local playbackInputState = {
 }
 local humanoidAutoRotateState = {}
 local playbackAnimationTracks = {}
+local captureFrame
 local captureAnimations
+local animateScriptState = {}
+local recordMouseDelta = Vector2.new(0, 0)
 
 local gui
 local rootFrame
@@ -630,6 +633,7 @@ local function copyInputState()
 	local copy = {
 		keys = {},
 		mouse = {},
+		mouseDelta = { round(recordMouseDelta.X), round(recordMouseDelta.Y) },
 	}
 	for name, down in pairs(recordInputState.keys) do
 		if down then
@@ -642,6 +646,10 @@ local function copyInputState()
 		end
 	end
 	return copy
+end
+
+local function resetFrameMouseDelta()
+	recordMouseDelta = Vector2.new(0, 0)
 end
 
 local function releasePlaybackInputs()
@@ -678,6 +686,43 @@ local function restoreHumanoidAutoRotate()
 			end)
 		end
 		humanoidAutoRotateState[humanoid] = nil
+	end
+end
+
+local function setAnimateScriptSuppressed(character, suppressed)
+	if not character then
+		return
+	end
+	local animate = character:FindFirstChild("Animate")
+	if not animate or (not animate:IsA("LocalScript") and not animate:IsA("Script")) then
+		return
+	end
+	if suppressed then
+		if animateScriptState[animate] == nil then
+			animateScriptState[animate] = animate.Enabled
+		end
+		pcall(function()
+			animate.Enabled = false
+		end)
+	else
+		local old = animateScriptState[animate]
+		if old ~= nil then
+			pcall(function()
+				animate.Enabled = old
+			end)
+			animateScriptState[animate] = nil
+		end
+	end
+end
+
+local function restoreAnimateScripts()
+	for animate, old in pairs(animateScriptState) do
+		if animate and animate.Parent then
+			pcall(function()
+				animate.Enabled = old
+			end)
+		end
+		animateScriptState[animate] = nil
 	end
 end
 
@@ -734,6 +779,17 @@ local function applyVirtualInputs(inputData)
 			playbackInputState.mouse[name] = nil
 		end
 	end
+	local delta = type(inputData.mouseDelta) == "table" and inputData.mouseDelta or nil
+	if delta then
+		local dx = tonumber(delta[1]) or 0
+		local dy = tonumber(delta[2]) or 0
+		if math.abs(dx) > 0 or math.abs(dy) > 0 then
+			pcall(function()
+				local pos = UserInputService:GetMouseLocation()
+				VirtualInputManager:SendMouseMoveEvent(pos.X + dx, pos.Y + dy, game)
+			end)
+		end
+	end
 end
 
 local function toggleShiftLockManual()
@@ -783,7 +839,30 @@ local function restoreTouch()
 	savedTouch = {}
 end
 
-local function captureFrame()
+local function zeroRootVelocity()
+	local _, _, root = getCharacterParts()
+	if root then
+		pcall(function()
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end)
+	end
+end
+
+local function refreshCurrentRecordFrame()
+	if mode ~= "record" or #frames <= 0 then
+		return
+	end
+	local snapshot = captureFrame()
+	if snapshot then
+		snapshot.vel = { 0, 0, 0 }
+		snapshot.ang = { 0, 0, 0 }
+		frames[playIndex] = snapshot
+	end
+	zeroRootVelocity()
+end
+
+captureFrame = function()
 	local character, humanoid, root = getCharacterParts()
 	if not root then
 		return nil
@@ -971,7 +1050,7 @@ local function sanitizeFrame(raw)
 		ang = vecToTable(tableToVec(raw.ang or raw.angular)),
 		cam = cfToTable(cam),
 		shiftlock = raw.shiftlock == true,
-		inputs = type(raw.inputs) == "table" and raw.inputs or { keys = {}, mouse = {} },
+		inputs = type(raw.inputs) == "table" and raw.inputs or { keys = {}, mouse = {}, mouseDelta = { 0, 0 } },
 		health = tonumber(raw.health),
 		state = raw.state,
 		animations = type(raw.animations) == "table" and raw.animations or {},
@@ -1019,6 +1098,7 @@ local function addFrame()
 	if frame then
 		table.insert(frames, frame)
 		playIndex = #frames
+		resetFrameMouseDelta()
 		return true
 	end
 	return false
@@ -1100,7 +1180,7 @@ local function applyFrameData(frame, index, dt)
 	if not frame then
 		return
 	end
-	local _, humanoid, root = getCharacterParts()
+	local character, humanoid, root = getCharacterParts()
 	if not root then
 		return
 	end
@@ -1119,6 +1199,7 @@ local function applyFrameData(frame, index, dt)
 	if humanoid then
 		pcall(function()
 			if mode == "play" or frozen then
+				setAnimateScriptSuppressed(character, true)
 				if humanoidAutoRotateState[humanoid] == nil then
 					humanoidAutoRotateState[humanoid] = humanoid.AutoRotate
 				end
@@ -1171,6 +1252,7 @@ local function startRecord()
 	end
 	recordBranchPending = false
 	recordInputState = { keys = {}, mouse = {} }
+	resetFrameMouseDelta()
 	mode = "record"
 	frozen = false
 	recordAccumulator = 0
@@ -1190,6 +1272,7 @@ local function stopPlayback()
 	releasePlaybackInputs()
 	clearPlaybackAnimations(0.08)
 	restoreHumanoidAutoRotate()
+	restoreAnimateScripts()
 	pcall(function()
 		camera.CameraType = startCameraType
 		camera.CameraSubject = startCameraSubject
@@ -1245,8 +1328,10 @@ local function setFrozen(value)
 	end
 	frozen = value and true or false
 	if mode == "record" and not frozen then
+		refreshCurrentRecordFrame()
 		clearPlaybackAnimations(0.08)
 		restoreHumanoidAutoRotate()
+		restoreAnimateScripts()
 		pcall(function()
 			camera.CameraType = startCameraType
 			camera.CameraSubject = startCameraSubject
@@ -1658,6 +1743,20 @@ connect(UserInputService.InputEnded, function(input)
 	end
 end)
 
+connect(UserInputService.InputChanged, function(input)
+	if mode ~= "record" or frozen or UserInputService:GetFocusedTextBox() then
+		return
+	end
+	if input.UserInputType == Enum.UserInputType.MouseMovement then
+		local delta = input.Delta
+		if typeof(delta) == "Vector2" then
+			recordMouseDelta += delta
+		elseif typeof(delta) == "Vector3" then
+			recordMouseDelta += Vector2.new(delta.X, delta.Y)
+		end
+	end
+end)
+
 connect(localPlayer.CharacterAdded, function()
 	task.wait(0.4)
 	if mode == "record" then
@@ -1738,6 +1837,7 @@ runtime.cleanup = function()
 	pcall(releasePlaybackInputs)
 	pcall(clearPlaybackAnimations)
 	pcall(restoreHumanoidAutoRotate)
+	pcall(restoreAnimateScripts)
 	pcall(restoreTouch)
 	pcall(function()
 		UserInputService.MouseBehavior = startMouseBehavior
