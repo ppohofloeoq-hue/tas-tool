@@ -39,6 +39,7 @@ local SMOOTH_VELOCITY_BLEND = 0.25
 local SMOOTH_ANGULAR_BLEND = 0.22
 local CAMERA_SMOOTH_RATE = 18
 local ANIMATION_PREVIEW_ONLY = true
+local ANIMATION_SNAPSHOT_INTERVAL = 0.1
 
 local SAVE_FOLDER = "TASLite"
 local SAVE_FILE = tostring(game.PlaceId) .. "_Replay.json"
@@ -105,8 +106,10 @@ local startMouseBehavior = UserInputService.MouseBehavior
 
 local mode = "idle"
 local frames = {}
+local animationSnapshots = {}
 local playIndex = 1
 local recordAccumulator = 0
+local animationAccumulator = 0
 local playbackAccumulator = 0
 local frozen = false
 local seekDir = 0
@@ -141,6 +144,7 @@ local humanoidAutoRotateState = {}
 local playbackAnimationTracks = {}
 local captureFrame
 local captureAnimations
+local captureAnimationSnapshot
 local animateScriptState = {}
 local recordMouseDelta = Vector2.new(0, 0)
 
@@ -840,6 +844,23 @@ local function restoreTouch()
 	savedTouch = {}
 end
 
+local function nearestAnimationSnapshot(index)
+	if #animationSnapshots <= 0 then
+		return {}
+	end
+	index = clamp(math.floor(tonumber(index) or playIndex or 1), 1, math.max(#frames, 1))
+	local best = nil
+	local bestDistance = math.huge
+	for _, snapshot in ipairs(animationSnapshots) do
+		local distance = math.abs((tonumber(snapshot.frame) or 1) - index)
+		if distance < bestDistance then
+			best = snapshot
+			bestDistance = distance
+		end
+	end
+	return best and best.animations or {}
+end
+
 local function refreshCurrentRecordFrame()
 	if mode ~= "record" or #frames <= 0 then
 		return
@@ -865,7 +886,6 @@ captureFrame = function()
 		inputs = copyInputState(),
 		health = humanoid and round(humanoid.Health) or nil,
 		state = humanoid and humanoid:GetState().Name or nil,
-		animations = captureAnimations(humanoid),
 	}
 	if humanoid then
 		frame.move = vecToTable(humanoid.MoveDirection)
@@ -947,6 +967,21 @@ captureAnimations = function(humanoid)
 	return result
 end
 
+captureAnimationSnapshot = function(index)
+	local _, humanoid = getCharacterParts()
+	if not humanoid then
+		return
+	end
+	local animations = captureAnimations(humanoid)
+	table.insert(animationSnapshots, {
+		frame = clamp(math.floor(index or #frames), 1, math.max(#frames, 1)),
+		animations = animations,
+	})
+	while #animationSnapshots > 0 and #animationSnapshots > math.max(120, math.ceil(#frames / 2)) do
+		table.remove(animationSnapshots, 1)
+	end
+end
+
 local function clearPlaybackAnimations(fadeTime)
 	for id, track in pairs(playbackAnimationTracks) do
 		if track then
@@ -962,7 +997,7 @@ local function applyRecordedAnimations(humanoid, frame, frozenPreview)
 	if not humanoid or type(frame) ~= "table" then
 		return
 	end
-	local animations = type(frame.animations) == "table" and frame.animations or {}
+	local animations = type(frame.animations) == "table" and frame.animations or nearestAnimationSnapshot(playIndex)
 	local animator = humanoid:FindFirstChildOfClass("Animator")
 	if not animator then
 		pcall(function()
@@ -1051,11 +1086,28 @@ local function sanitizeFrame(raw)
 		inputs = type(raw.inputs) == "table" and raw.inputs or { keys = {}, mouse = {}, mouseDelta = { 0, 0 } },
 		health = tonumber(raw.health),
 		state = raw.state,
-		animations = type(raw.animations) == "table" and raw.animations or {},
+		animations = type(raw.animations) == "table" and raw.animations or nil,
 		move = vecToTable(tableToVec(raw.move)),
 		jump = raw.jump == true,
 		sit = raw.sit == true,
 	}
+end
+
+local function sanitizeAnimationSnapshots(rawSnapshots, frameCount)
+	local result = {}
+	if type(rawSnapshots) ~= "table" then
+		return result
+	end
+	for _, snapshot in ipairs(rawSnapshots) do
+		if type(snapshot) == "table" and type(snapshot.animations) == "table" then
+			local index = clamp(math.floor(tonumber(snapshot.frame) or 1), 1, math.max(frameCount, 1))
+			table.insert(result, {
+				frame = index,
+				animations = snapshot.animations,
+			})
+		end
+	end
+	return result
 end
 
 local function interpolateFrame(a, b, alpha)
@@ -1091,8 +1143,17 @@ local function interpolateFrame(a, b, alpha)
 	return blended
 end
 
-local function addFrame()
-	local frame = captureFrame()
+local function buildInterpolatedFrame(previousFrame, currentFrame, alpha)
+	local frame = interpolateFrame(previousFrame, currentFrame, alpha)
+	frame.inputs = currentFrame.inputs
+	frame.shiftlock = currentFrame.shiftlock
+	frame.jump = currentFrame.jump
+	frame.sit = currentFrame.sit
+	frame.state = currentFrame.state
+	return frame
+end
+
+local function appendFrame(frame)
 	if frame then
 		table.insert(frames, frame)
 		playIndex = #frames
@@ -1100,6 +1161,10 @@ local function addFrame()
 		return true
 	end
 	return false
+end
+
+local function addFrame()
+	return appendFrame(captureFrame())
 end
 
 local function applyCamera(frame, dt)
@@ -1259,6 +1324,7 @@ local function startRecord()
 	end
 	if recordMode == "replace" then
 		frames = {}
+		animationSnapshots = {}
 		playIndex = 1
 	end
 	recordBranchPending = false
@@ -1267,8 +1333,10 @@ local function startRecord()
 	mode = "record"
 	frozen = false
 	recordAccumulator = 0
+	animationAccumulator = 0
 	applyRecordNoCollision()
 	addFrame()
+	captureAnimationSnapshot(playIndex)
 	log(tr("record_started") .. " [" .. recordMode .. "]")
 end
 
@@ -1334,7 +1402,13 @@ local function setFrozen(value)
 		for i = #frames, playIndex + 1, -1 do
 			frames[i] = nil
 		end
+		for i = #animationSnapshots, 1, -1 do
+			if (tonumber(animationSnapshots[i].frame) or 1) > playIndex then
+				table.remove(animationSnapshots, i)
+			end
+		end
 		recordAccumulator = 0
+		animationAccumulator = 0
 		playIndex = #frames
 		recordBranchPending = false
 		log("Record branch trimmed to frame " .. tostring(playIndex))
@@ -1416,6 +1490,7 @@ local function saveReplay()
 		camera_mode = cameraMode,
 		record_mode = recordMode,
 		checkpoints = checkpoints,
+		animation_snapshots = animationSnapshots,
 		frames = frames,
 	}
 	local ok, encoded = pcall(function()
@@ -1467,6 +1542,7 @@ local function loadReplay()
 		end
 	end
 	frames = loadedFrames
+	animationSnapshots = sanitizeAnimationSnapshots(data.animation_snapshots, #frames)
 	checkpoints = {}
 	if type(data.checkpoints) == "table" then
 		for name, index in pairs(data.checkpoints) do
@@ -1486,6 +1562,7 @@ local function eraseReplay()
 	stopRecord()
 	stopPlayback()
 	frames = {}
+	animationSnapshots = {}
 	playIndex = 1
 	checkpoints = {}
 	log(tr("erased"))
@@ -1836,11 +1913,26 @@ connect(RunService.Heartbeat, function(dt)
 		return
 	end
 	recordAccumulator += clamp(dt, 0, 0.25)
+	animationAccumulator += clamp(dt, 0, 0.25)
+	local currentFrame = nil
+	local previousFrame = frames[#frames]
+	local totalSteps = math.min(RECORD_MAX_STEPS_PER_RENDER, math.max(1, math.floor(recordAccumulator / timelineStep)))
 	local steps = 0
 	while recordAccumulator >= timelineStep and steps < RECORD_MAX_STEPS_PER_RENDER do
-		addFrame()
+		if not currentFrame then
+			currentFrame = captureFrame()
+		end
+		local frameToAdd = currentFrame
+		if previousFrame and totalSteps > 1 then
+			frameToAdd = buildInterpolatedFrame(previousFrame, currentFrame, (steps + 1) / totalSteps)
+		end
+		appendFrame(frameToAdd)
 		recordAccumulator -= timelineStep
 		steps += 1
+	end
+	if animationAccumulator >= ANIMATION_SNAPSHOT_INTERVAL then
+		captureAnimationSnapshot(playIndex)
+		animationAccumulator = 0
 	end
 	applyRecordNoCollision()
 end)
