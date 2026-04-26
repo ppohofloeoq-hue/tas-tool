@@ -38,6 +38,7 @@ local SMOOTH_ROTATION_ALPHA = 0.22
 local SMOOTH_VELOCITY_BLEND = 0.25
 local SMOOTH_ANGULAR_BLEND = 0.22
 local CAMERA_SMOOTH_RATE = 18
+local ANIMATION_PREVIEW_ONLY = true
 
 local SAVE_FOLDER = "TASLite"
 local SAVE_FILE = tostring(game.PlaceId) .. "_Replay.json"
@@ -888,6 +889,16 @@ local function humanoidStateFromString(value)
 	return nil
 end
 
+local function isCriticalMovementState(stateName)
+	local state = tostring(stateName or "")
+	return state == "Jumping"
+		or state == "Freefall"
+		or state == "FallingDown"
+		or state == "Climbing"
+		or state == "Swimming"
+		or state == "PlatformStanding"
+end
+
 captureAnimations = function(humanoid)
 	local result = {}
 	if not humanoid then
@@ -1136,8 +1147,13 @@ local function applyRootBlended(root, frame, modeName)
 	end
 	if modeName == "frameblend" then
 		root.CFrame = target
-		root.AssemblyLinearVelocity = root.AssemblyLinearVelocity:Lerp(tableToVec(frame.vel), clamp(FRAMEBLEND_VELOCITY_BLEND * blendScale, 0.01, 1))
-		root.AssemblyAngularVelocity = root.AssemblyAngularVelocity:Lerp(tableToVec(frame.ang), clamp(FRAMEBLEND_ANGULAR_BLEND * blendScale, 0.01, 1))
+		if isCriticalMovementState(frame.state) then
+			root.AssemblyLinearVelocity = tableToVec(frame.vel)
+			root.AssemblyAngularVelocity = tableToVec(frame.ang)
+		else
+			root.AssemblyLinearVelocity = root.AssemblyLinearVelocity:Lerp(tableToVec(frame.vel), clamp(FRAMEBLEND_VELOCITY_BLEND * blendScale, 0.01, 1))
+			root.AssemblyAngularVelocity = root.AssemblyAngularVelocity:Lerp(tableToVec(frame.ang), clamp(FRAMEBLEND_ANGULAR_BLEND * blendScale, 0.01, 1))
+		end
 		return
 	end
 
@@ -1185,8 +1201,13 @@ local function applyFrameData(frame, index, dt)
 	setShiftLock(frameShiftLock)
 	if humanoid then
 		pcall(function()
-			if mode == "play" or frozen then
+			if frozen then
 				setAnimateScriptSuppressed(character, true)
+			end
+			if mode == "play" then
+				if not ANIMATION_PREVIEW_ONLY then
+					setAnimateScriptSuppressed(character, true)
+				end
 				if humanoidAutoRotateState[humanoid] == nil then
 					humanoidAutoRotateState[humanoid] = humanoid.AutoRotate
 				end
@@ -1196,13 +1217,16 @@ local function applyFrameData(frame, index, dt)
 			humanoid.Jump = frame.jump == true
 			humanoid:Move(tableToVec(frame.move), false)
 			local state = humanoidStateFromString(frame.state)
-			if state and state ~= Enum.HumanoidStateType.Dead and state ~= lastPlaybackHumanoidState then
+			local shouldForceState = frozen or isCriticalMovementState(frame.state)
+			if shouldForceState and state and state ~= Enum.HumanoidStateType.Dead and state ~= lastPlaybackHumanoidState then
 				humanoid:ChangeState(state)
 				lastPlaybackHumanoidState = state
 			end
 		end)
-		if mode == "play" or frozen then
+		if frozen then
 			applyRecordedAnimations(humanoid, frame, frozen)
+		elseif not ANIMATION_PREVIEW_ONLY and mode == "play" then
+			applyRecordedAnimations(humanoid, frame, false)
 		end
 	end
 	if frozen or effectiveMode == "ghost" then
@@ -1773,14 +1797,6 @@ connect(RunService.RenderStepped, function(dt)
 			updateUi()
 			return
 		end
-		recordAccumulator += clamp(dt, 0, 0.25)
-		local steps = 0
-		while recordAccumulator >= timelineStep and steps < RECORD_MAX_STEPS_PER_RENDER do
-			addFrame()
-			recordAccumulator -= timelineStep
-			steps += 1
-		end
-		applyRecordNoCollision()
 	elseif mode == "play" then
 		if frozen then
 			applyFrame(playIndex, dt)
@@ -1813,6 +1829,20 @@ connect(RunService.RenderStepped, function(dt)
 	end
 
 	updateUi()
+end)
+
+connect(RunService.Heartbeat, function(dt)
+	if runtime.cleaning or mode ~= "record" or frozen then
+		return
+	end
+	recordAccumulator += clamp(dt, 0, 0.25)
+	local steps = 0
+	while recordAccumulator >= timelineStep and steps < RECORD_MAX_STEPS_PER_RENDER do
+		addFrame()
+		recordAccumulator -= timelineStep
+		steps += 1
+	end
+	applyRecordNoCollision()
 end)
 
 runtime.cleanup = function()
