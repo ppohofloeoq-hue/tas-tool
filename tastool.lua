@@ -136,6 +136,10 @@ local recordInputState = {
 	keys = {},
 	mouse = {},
 }
+local physicalInputState = {
+	keys = {},
+	mouse = {},
+}
 local playbackInputState = {
 	keys = {},
 	mouse = {},
@@ -634,6 +638,8 @@ local function shouldRecordKey(keyCode)
 	return not toolHotkeys[keyCode.Name]
 end
 
+local resetFrameMouseDelta
+
 local function copyInputState()
 	local copy = {
 		keys = {},
@@ -653,7 +659,30 @@ local function copyInputState()
 	return copy
 end
 
-local function resetFrameMouseDelta()
+local function clonePhysicalInputState()
+	local clone = {
+		keys = {},
+		mouse = {},
+	}
+	for name, down in pairs(physicalInputState.keys) do
+		if down then
+			clone.keys[name] = true
+		end
+	end
+	for name, down in pairs(physicalInputState.mouse) do
+		if down then
+			clone.mouse[name] = true
+		end
+	end
+	return clone
+end
+
+local function syncRecordInputsToPhysical()
+	recordInputState = clonePhysicalInputState()
+	resetFrameMouseDelta()
+end
+
+resetFrameMouseDelta = function()
 	recordMouseDelta = Vector2.new(0, 0)
 end
 
@@ -1328,8 +1357,7 @@ local function startRecord()
 		playIndex = 1
 	end
 	recordBranchPending = false
-	recordInputState = { keys = {}, mouse = {} }
-	resetFrameMouseDelta()
+	syncRecordInputsToPhysical()
 	mode = "record"
 	frozen = false
 	recordAccumulator = 0
@@ -1398,7 +1426,6 @@ end
 
 local function setFrozen(value)
 	if mode == "record" and frozen and not value and recordBranchPending then
-		refreshCurrentRecordFrame()
 		for i = #frames, playIndex + 1, -1 do
 			frames[i] = nil
 		end
@@ -1411,10 +1438,12 @@ local function setFrozen(value)
 		animationAccumulator = 0
 		playIndex = #frames
 		recordBranchPending = false
+		syncRecordInputsToPhysical()
 		log("Record branch trimmed to frame " .. tostring(playIndex))
 	end
 	frozen = value and true or false
 	if mode == "record" and not frozen then
+		syncRecordInputsToPhysical()
 		clearPlaybackAnimations(0.08)
 		restoreHumanoidAutoRotate()
 		restoreAnimateScripts()
@@ -1753,13 +1782,22 @@ end)
 
 connect(UserInputService.InputBegan, function(input, gameProcessed)
 	local focused = UserInputService:GetFocusedTextBox()
-	if mode == "record" and not focused then
+	if not focused then
 		if input.UserInputType == Enum.UserInputType.Keyboard and shouldRecordKey(input.KeyCode) then
-			recordInputState.keys[input.KeyCode.Name] = true
+			physicalInputState.keys[input.KeyCode.Name] = true
+			if mode == "record" and not frozen then
+				recordInputState.keys[input.KeyCode.Name] = true
+			end
 		elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
-			recordInputState.mouse.MouseButton1 = true
+			physicalInputState.mouse.MouseButton1 = true
+			if mode == "record" and not frozen then
+				recordInputState.mouse.MouseButton1 = true
+			end
 		elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
-			recordInputState.mouse.MouseButton2 = true
+			physicalInputState.mouse.MouseButton2 = true
+			if mode == "record" and not frozen then
+				recordInputState.mouse.MouseButton2 = true
+			end
 		end
 	end
 	if input.UserInputType ~= Enum.UserInputType.Keyboard then
@@ -1814,13 +1852,22 @@ end)
 
 connect(UserInputService.InputEnded, function(input)
 	local focused = UserInputService:GetFocusedTextBox()
-	if mode == "record" and not focused then
+	if not focused then
 		if input.UserInputType == Enum.UserInputType.Keyboard and shouldRecordKey(input.KeyCode) then
-			recordInputState.keys[input.KeyCode.Name] = nil
+			physicalInputState.keys[input.KeyCode.Name] = nil
+			if mode == "record" and not frozen then
+				recordInputState.keys[input.KeyCode.Name] = nil
+			end
 		elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
-			recordInputState.mouse.MouseButton1 = nil
+			physicalInputState.mouse.MouseButton1 = nil
+			if mode == "record" and not frozen then
+				recordInputState.mouse.MouseButton1 = nil
+			end
 		elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
-			recordInputState.mouse.MouseButton2 = nil
+			physicalInputState.mouse.MouseButton2 = nil
+			if mode == "record" and not frozen then
+				recordInputState.mouse.MouseButton2 = nil
+			end
 		end
 	end
 	if input.UserInputType == Enum.UserInputType.Keyboard then
