@@ -77,6 +77,9 @@ local runtime = {
 	connections = {},
 	gui = nil,
 	instanceRoots = {},
+	modules = {},
+	moduleOrder = {},
+	api = {},
 	cleaning = false,
 }
 _G[RUNTIME_KEY] = runtime
@@ -95,6 +98,43 @@ local function disconnectAll()
 			pcall(function()
 				connection:Disconnect()
 			end)
+		end
+	end
+end
+
+local function registerModule(name, module)
+	module = type(module) == "table" and module or {}
+	module.Name = name
+	runtime.modules[name] = module
+	table.insert(runtime.moduleOrder, name)
+	if type(module.Init) == "function" then
+		local ok, err = pcall(module.Init, runtime)
+		if not ok then
+			warn("[TAS Lite] Module Init failed: " .. tostring(name) .. " :: " .. tostring(err))
+		end
+	end
+	return module
+end
+
+local function startModules()
+	for _, name in ipairs(runtime.moduleOrder) do
+		local module = runtime.modules[name]
+		if module and type(module.OnStart) == "function" and not module.__started then
+			module.__started = true
+			local ok, err = pcall(module.OnStart, runtime)
+			if not ok then
+				warn("[TAS Lite] Module Start failed: " .. tostring(name) .. " :: " .. tostring(err))
+			end
+		end
+	end
+end
+
+local function stopModules()
+	for i = #runtime.moduleOrder, 1, -1 do
+		local name = runtime.moduleOrder[i]
+		local module = runtime.modules[name]
+		if module and type(module.OnStop) == "function" then
+			pcall(module.OnStop, runtime)
 		end
 	end
 end
@@ -155,6 +195,18 @@ local function makeStringValue(parent, name, value)
 	return makeRuntimeInstance("StringValue", name, parent, { Value = tostring(value or "") })
 end
 
+local function makeScriptStub(parent, className, name, role)
+	local inst = makeRuntimeInstance(className, name, parent, {
+		Disabled = true,
+	})
+	pcall(function()
+		inst:SetAttribute("RuntimeModule", role or name)
+		inst:SetAttribute("LoadedBy", "tas_lite_script.lua")
+		inst:SetAttribute("ExecutorNote", "Client-created scripts are stubs; real code is loaded by ModuleLoader.")
+	end)
+	return inst
+end
+
 local function bootstrapInstanceTree()
 	destroyOwnedChild(Workspace, "HappaTAS")
 	destroyOwnedChild(ReplicatedStorage, "TASRS")
@@ -170,7 +222,7 @@ local function bootstrapInstanceTree()
 	runtime.instanceRoots = {}
 
 	local workspaceRoot = makeFolder(Workspace, "HappaTAS")
-	makeFolder(workspaceRoot, "AddMobileShiftlock")
+	makeScriptStub(workspaceRoot, "LocalScript", "AddMobileShiftlock", "ShiftlockController")
 	makeRuntimeInstance("SpawnLocation", "SpawnLocation", workspaceRoot, {
 		Anchored = true,
 		CanCollide = false,
@@ -242,29 +294,25 @@ local function bootstrapInstanceTree()
 	makeFolder(starterGuiRoot, "DataStatus")
 	makeFolder(starterGuiRoot, "Mobile")
 	makeStringValue(starterGuiRoot, "Colors", "runtime")
-	for _, name in ipairs({
-		"MenuManager",
-		"TASMain",
-		"Inputs",
-		"CreateStats",
-		"IdleStats",
-		"JoinMessage",
-		"MainMenu",
-		"Merge",
-		"TestStats",
-		"MergeStats",
-		"Status",
-	}) do
-		makeFolder(starterGuiRoot, name)
-	end
+	makeScriptStub(starterGuiRoot, "LocalScript", "MenuManager", "GuiController")
+	makeScriptStub(starterGuiRoot, "LocalScript", "TASMain", "PlaybackController")
+	makeScriptStub(starterGuiRoot, "ModuleScript", "Inputs", "InputController")
+	makeScriptStub(starterGuiRoot, "ModuleScript", "CreateStats", "StatsController")
+	makeScriptStub(starterGuiRoot, "ModuleScript", "IdleStats", "StatsController")
+	makeScriptStub(starterGuiRoot, "ModuleScript", "JoinMessage", "GuiController")
+	makeScriptStub(starterGuiRoot, "ModuleScript", "MainMenu", "CommandRouter")
+	makeScriptStub(starterGuiRoot, "ModuleScript", "Merge", "TimelineRecorder")
+	makeScriptStub(starterGuiRoot, "ModuleScript", "TestStats", "StatsController")
+	makeScriptStub(starterGuiRoot, "LocalScript", "MergeStats", "StatsController")
+	makeScriptStub(starterGuiRoot, "ModuleScript", "Status", "GuiController")
 
 	local starterScripts = StarterPlayer:FindFirstChild("StarterPlayerScripts")
 	if starterScripts then
 		destroyOwnedChild(starterScripts, "TASClientRuntime")
 		local clientRuntime = makeFolder(starterScripts, "TASClientRuntime")
-		makeStringValue(clientRuntime, "PlayerScriptsLoader", "logic lives in executor runtime")
-		makeStringValue(clientRuntime, "RbxCharacterSounds", "left untouched")
-		makeStringValue(clientRuntime, "PlayerModule", "left untouched")
+		makeScriptStub(clientRuntime, "LocalScript", "PlayerScriptsLoader", "ModuleLoader")
+		makeScriptStub(clientRuntime, "LocalScript", "RbxCharacterSounds", "CharacterSoundBridge")
+		makeScriptStub(clientRuntime, "ModuleScript", "PlayerModule", "PlayerModuleBridge")
 		table.insert(runtime.instanceRoots, clientRuntime)
 	end
 
@@ -2039,9 +2087,132 @@ local function wireInstanceTree()
 	end
 end
 
+local function loadRuntimeModules()
+	runtime.api = {
+		startRecord = startRecord,
+		stopRecord = stopRecord,
+		toggleRecord = toggleRecord,
+		startPlayback = startPlayback,
+		stopPlayback = stopPlayback,
+		togglePlayback = togglePlayback,
+		applyFrame = applyFrame,
+		setFrozen = setFrozen,
+		stepFrame = stepFrame,
+		setCheckpoint = setCheckpoint,
+		gotoCheckpoint = gotoCheckpoint,
+		saveReplay = saveReplay,
+		loadReplay = loadReplay,
+		eraseReplay = eraseReplay,
+		runCommand = runCommand,
+		runTasAction = runTasAction,
+		tasSummary = tasSummary,
+		setShiftLock = setShiftLock,
+		toggleShiftLockManual = toggleShiftLockManual,
+		captureFrame = captureFrame,
+		captureAnimations = captureAnimations,
+		captureAnimationSnapshot = captureAnimationSnapshot,
+		applyRecordedAnimations = applyRecordedAnimations,
+		releasePlaybackInputs = releasePlaybackInputs,
+		applyVirtualInputs = applyVirtualInputs,
+		updateUi = updateUi,
+		log = log,
+	}
+
+	registerModule("ModuleLoader", {
+		OnStart = function()
+			log("ModuleLoader: " .. tostring(#runtime.moduleOrder) .. " modules loaded")
+		end,
+	})
+
+	registerModule("InstanceBootstrap", {
+		Tree = tasInstances,
+		Get = function(_, name)
+			return tasInstances[name]
+		end,
+	})
+
+	registerModule("InputController", {
+		InputState = recordInputState,
+		PhysicalState = physicalInputState,
+		ApplyVirtual = applyVirtualInputs,
+		ReleaseVirtual = releasePlaybackInputs,
+	})
+
+	registerModule("ShiftlockController", {
+		Set = setShiftLock,
+		Toggle = toggleShiftLockManual,
+		Get = function()
+			return shiftLockState
+		end,
+	})
+
+	registerModule("TimelineRecorder", {
+		Start = startRecord,
+		Stop = stopRecord,
+		Toggle = toggleRecord,
+		CaptureFrame = captureFrame,
+		CaptureAnimationSnapshot = captureAnimationSnapshot,
+	})
+
+	registerModule("PlaybackController", {
+		Start = startPlayback,
+		Stop = stopPlayback,
+		Toggle = togglePlayback,
+		ApplyFrame = applyFrame,
+		SetFrozen = setFrozen,
+		StepFrame = stepFrame,
+	})
+
+	registerModule("AnimationController", {
+		Capture = captureAnimations,
+		CaptureSnapshot = captureAnimationSnapshot,
+		Apply = applyRecordedAnimations,
+		Clear = clearPlaybackAnimations,
+	})
+
+	registerModule("CheckpointService", {
+		Set = setCheckpoint,
+		GoTo = gotoCheckpoint,
+	})
+
+	registerModule("SaveLoadService", {
+		Save = saveReplay,
+		Load = loadReplay,
+		Erase = eraseReplay,
+		Path = SAVE_PATH,
+	})
+
+	registerModule("CommandRouter", {
+		Run = runCommand,
+		RunAction = runTasAction,
+	})
+
+	registerModule("GuiController", {
+		Build = buildGui,
+		Update = updateUi,
+		Log = log,
+	})
+
+	registerModule("StatsController", {
+		Summary = tasSummary,
+	})
+
+	registerModule("CleanupManager", {
+		OnStop = function()
+			releasePlaybackInputs()
+			clearPlaybackAnimations(0.08)
+			restoreHumanoidAutoRotate()
+			restoreAnimateScripts()
+			restoreTouch()
+		end,
+	})
+end
+
 bootstrapInstanceTree()
+loadRuntimeModules()
 wireInstanceTree()
 buildGui()
+startModules()
 
 connect(freezeButton.MouseButton1Click, function()
 	setFrozen(not frozen)
@@ -2304,6 +2475,7 @@ runtime.cleanup = function()
 		return
 	end
 	runtime.cleaning = true
+	pcall(stopModules)
 	pcall(stopRecord)
 	pcall(stopPlayback)
 	pcall(releasePlaybackInputs)
