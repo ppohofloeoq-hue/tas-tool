@@ -51,6 +51,10 @@ local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local TweenService = game:GetService("TweenService")
 local CoreGui = game:GetService("CoreGui")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
+local StarterPlayer = game:GetService("StarterPlayer")
 local VirtualInputManager
 pcall(function()
 	VirtualInputManager = game:GetService("VirtualInputManager")
@@ -72,6 +76,7 @@ end
 local runtime = {
 	connections = {},
 	gui = nil,
+	instanceRoots = {},
 	cleaning = false,
 }
 _G[RUNTIME_KEY] = runtime
@@ -92,6 +97,183 @@ local function disconnectAll()
 			end)
 		end
 	end
+end
+
+local tasInstances = {
+	events = {},
+	functions = {},
+	remotes = {},
+	remoteFunctions = {},
+	values = {},
+}
+
+local tasRuntimeState = {
+	zoom = 1,
+	animation = nil,
+}
+
+local function tagOwned(inst)
+	pcall(function()
+		inst:SetAttribute("TASLiteOwned", true)
+	end)
+	return inst
+end
+
+local function destroyOwnedChild(parent, name)
+	local child = parent and parent:FindFirstChild(name)
+	if child then
+		local owned = false
+		pcall(function()
+			owned = child:GetAttribute("TASLiteOwned") == true
+		end)
+		if owned then
+			pcall(function()
+				child:Destroy()
+			end)
+		end
+	end
+end
+
+local function makeRuntimeInstance(className, name, parent, props)
+	local inst = Instance.new(className)
+	inst.Name = name
+	tagOwned(inst)
+	for key, value in pairs(props or {}) do
+		pcall(function()
+			inst[key] = value
+		end)
+	end
+	inst.Parent = parent
+	return inst
+end
+
+local function makeFolder(parent, name)
+	return makeRuntimeInstance("Folder", name, parent)
+end
+
+local function makeStringValue(parent, name, value)
+	return makeRuntimeInstance("StringValue", name, parent, { Value = tostring(value or "") })
+end
+
+local function bootstrapInstanceTree()
+	destroyOwnedChild(Workspace, "HappaTAS")
+	destroyOwnedChild(ReplicatedStorage, "TASRS")
+	destroyOwnedChild(StarterGui, "TASUserInterface")
+
+	tasInstances = {
+		events = {},
+		functions = {},
+		remotes = {},
+		remoteFunctions = {},
+		values = {},
+	}
+	runtime.instanceRoots = {}
+
+	local workspaceRoot = makeFolder(Workspace, "HappaTAS")
+	makeFolder(workspaceRoot, "AddMobileShiftlock")
+	makeRuntimeInstance("SpawnLocation", "SpawnLocation", workspaceRoot, {
+		Anchored = true,
+		CanCollide = false,
+		Transparency = 1,
+		Size = Vector3.new(4, 1, 4),
+		CFrame = CFrame.new(0, -5000, 0),
+		Neutral = true,
+		Enabled = false,
+	})
+	makeRuntimeInstance("Part", "Box_9472", workspaceRoot, {
+		Anchored = true,
+		CanCollide = false,
+		CanTouch = false,
+		Transparency = 1,
+		Size = Vector3.new(1, 1, 1),
+		CFrame = CFrame.new(0, -5000, 0),
+	})
+
+	local rsRoot = makeFolder(ReplicatedStorage, "TASRS")
+	local bindableEvents = makeFolder(rsRoot, "BindableEvents")
+	local bindableFunctions = makeFolder(rsRoot, "BindableFunctions")
+	local remoteEvents = makeFolder(rsRoot, "RemoteEvents")
+	local remoteFunctions = makeFolder(rsRoot, "RemoteFunctions")
+
+	for _, name in ipairs({
+		"LockAnim",
+		"LockShiftlock",
+		"RemoveZoomSpring",
+		"SetAnimation",
+		"SetTAS",
+		"SetZoom",
+		"ShiftlockRotation",
+		"ShiftlockSwitch",
+	}) do
+		tasInstances.events[name] = makeRuntimeInstance("BindableEvent", name, bindableEvents)
+	end
+
+	for _, name in ipairs({
+		"GetAnimation",
+		"GetTAS",
+		"GetZoom",
+	}) do
+		tasInstances.functions[name] = makeRuntimeInstance("BindableFunction", name, bindableFunctions)
+	end
+
+	for _, name in ipairs({
+		"Initiator",
+		"MenuEvents",
+	}) do
+		tasInstances.remotes[name] = makeRuntimeInstance("RemoteEvent", name, remoteEvents)
+	end
+
+	for _, name in ipairs({
+		"AuthLoad",
+		"SaveLoad",
+	}) do
+		tasInstances.remoteFunctions[name] = makeRuntimeInstance("RemoteFunction", name, remoteFunctions)
+	end
+
+	tasInstances.values.BaseCameras = makeStringValue(rsRoot, "BaseCameras", "Client bootstrap placeholder")
+	tasInstances.values.MouseLockControllers = makeStringValue(rsRoot, "MouseLockControllers", "Client bootstrap placeholder")
+	tasInstances.values.Version = makeStringValue(rsRoot, "Version", VERSION)
+
+	local starterGuiRoot = makeRuntimeInstance("ScreenGui", "TASUserInterface", StarterGui, {
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		Enabled = false,
+	})
+	makeFolder(starterGuiRoot, "DataStatus")
+	makeFolder(starterGuiRoot, "Mobile")
+	makeStringValue(starterGuiRoot, "Colors", "runtime")
+	for _, name in ipairs({
+		"MenuManager",
+		"TASMain",
+		"Inputs",
+		"CreateStats",
+		"IdleStats",
+		"JoinMessage",
+		"MainMenu",
+		"Merge",
+		"TestStats",
+		"MergeStats",
+		"Status",
+	}) do
+		makeFolder(starterGuiRoot, name)
+	end
+
+	local starterScripts = StarterPlayer:FindFirstChild("StarterPlayerScripts")
+	if starterScripts then
+		destroyOwnedChild(starterScripts, "TASClientRuntime")
+		local clientRuntime = makeFolder(starterScripts, "TASClientRuntime")
+		makeStringValue(clientRuntime, "PlayerScriptsLoader", "logic lives in executor runtime")
+		makeStringValue(clientRuntime, "RbxCharacterSounds", "left untouched")
+		makeStringValue(clientRuntime, "PlayerModule", "left untouched")
+		table.insert(runtime.instanceRoots, clientRuntime)
+	end
+
+	tasInstances.workspaceRoot = workspaceRoot
+	tasInstances.rsRoot = rsRoot
+	tasInstances.guiRoot = starterGuiRoot
+	table.insert(runtime.instanceRoots, workspaceRoot)
+	table.insert(runtime.instanceRoots, rsRoot)
+	table.insert(runtime.instanceRoots, starterGuiRoot)
 end
 
 local localPlayer = Players.LocalPlayer
@@ -1732,6 +1914,133 @@ local function runCommand(raw)
 	updateUi()
 end
 
+local function tasSummary()
+	return {
+		version = VERSION,
+		mode = mode,
+		frame = playIndex,
+		frames = #frames,
+		frozen = frozen,
+		recordMode = recordMode,
+		playbackMode = playbackMode,
+		cameraMode = cameraMode,
+		playbackSpeed = playbackSpeed,
+		shiftlock = shiftLockState,
+		checkpoints = checkpoints,
+		savePath = SAVE_PATH,
+	}
+end
+
+local function runTasAction(action, value)
+	local cmd = string.lower(tostring(action or ""))
+	if cmd == "play" or cmd == "startplay" or cmd == "startplayback" then
+		startPlayback()
+	elseif cmd == "stop" or cmd == "stopplay" or cmd == "stopplayback" then
+		stopPlayback()
+	elseif cmd == "toggleplay" or cmd == "toggleplayback" then
+		togglePlayback()
+	elseif cmd == "record" or cmd == "startrecord" then
+		startRecord()
+	elseif cmd == "stoprecord" then
+		stopRecord()
+	elseif cmd == "togglerecord" then
+		toggleRecord()
+	elseif cmd == "freeze" then
+		setFrozen(value ~= false)
+	elseif cmd == "unfreeze" then
+		setFrozen(false)
+	elseif cmd == "seek" or cmd == "frame" then
+		local target = tonumber(value)
+		if target and #frames > 0 then
+			applyFrame(clamp(target, 1, #frames), timelineStep)
+		end
+	elseif cmd == "save" then
+		saveReplay()
+	elseif cmd == "load" then
+		loadReplay()
+	elseif cmd == "erase" then
+		eraseReplay()
+	end
+	updateUi()
+	return tasSummary()
+end
+
+local function wireInstanceTree()
+	local events = tasInstances.events or {}
+	local functions = tasInstances.functions or {}
+	local remoteFunctions = tasInstances.remoteFunctions or {}
+
+	if events.ShiftlockSwitch then
+		connect(events.ShiftlockSwitch.Event, function()
+			toggleShiftLockManual()
+			updateUi()
+		end)
+	end
+	if events.LockShiftlock then
+		connect(events.LockShiftlock.Event, function(enabled)
+			setShiftLock(enabled == true)
+			updateUi()
+		end)
+	end
+	if events.SetZoom then
+		connect(events.SetZoom.Event, function(value)
+			tasRuntimeState.zoom = tonumber(value) or tasRuntimeState.zoom
+		end)
+	end
+	if events.RemoveZoomSpring then
+		connect(events.RemoveZoomSpring.Event, function()
+			tasRuntimeState.zoom = 1
+		end)
+	end
+	if events.SetAnimation then
+		connect(events.SetAnimation.Event, function(value)
+			tasRuntimeState.animation = value
+		end)
+	end
+	if events.LockAnim then
+		connect(events.LockAnim.Event, function(enabled)
+			ANIMATION_PREVIEW_ONLY = not (enabled == true)
+		end)
+	end
+	if events.SetTAS then
+		connect(events.SetTAS.Event, function(action, value)
+			runTasAction(action, value)
+		end)
+	end
+	if events.ShiftlockRotation then
+		connect(events.ShiftlockRotation.Event, function(value)
+			tasRuntimeState.shiftlockRotation = value
+		end)
+	end
+
+	if functions.GetTAS then
+		functions.GetTAS.OnInvoke = tasSummary
+	end
+	if functions.GetZoom then
+		functions.GetZoom.OnInvoke = function()
+			return tasRuntimeState.zoom
+		end
+	end
+	if functions.GetAnimation then
+		functions.GetAnimation.OnInvoke = function(index)
+			return tasRuntimeState.animation or nearestAnimationSnapshot(index or playIndex)
+		end
+	end
+
+	if remoteFunctions.AuthLoad then
+		remoteFunctions.AuthLoad.OnClientInvoke = function()
+			return true, VERSION
+		end
+	end
+	if remoteFunctions.SaveLoad then
+		remoteFunctions.SaveLoad.OnClientInvoke = function(action)
+			return runTasAction(action)
+		end
+	end
+end
+
+bootstrapInstanceTree()
+wireInstanceTree()
 buildGui()
 
 connect(freezeButton.MouseButton1Click, function()
@@ -2015,6 +2324,14 @@ runtime.cleanup = function()
 			runtime.gui:Destroy()
 		end)
 	end
+	for _, root in ipairs(runtime.instanceRoots or {}) do
+		if root and root.Parent then
+			pcall(function()
+				root:Destroy()
+			end)
+		end
+	end
+	runtime.instanceRoots = {}
 	if rawget(_G, RUNTIME_KEY) == runtime then
 		_G[RUNTIME_KEY] = nil
 	end
