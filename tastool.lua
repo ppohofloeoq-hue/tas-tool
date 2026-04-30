@@ -56,6 +56,14 @@ pcall(function()
 	VirtualInputManager = game:GetService("VirtualInputManager")
 end)
 
+local executorEnv = getfenv()
+local executorGetHui = rawget(executorEnv, "gethui")
+local executorIsFile = rawget(executorEnv, "isfile")
+local executorReadFile = rawget(executorEnv, "readfile")
+local executorWriteFile = rawget(executorEnv, "writefile")
+local executorIsFolder = rawget(executorEnv, "isfolder")
+local executorMakeFolder = rawget(executorEnv, "makefolder")
+
 local oldRuntime = rawget(_G, RUNTIME_KEY)
 if type(oldRuntime) == "table" and type(oldRuntime.cleanup) == "function" then
 	pcall(oldRuntime.cleanup)
@@ -288,8 +296,8 @@ local function getCharacterParts()
 end
 
 local function getUiParent()
-	if type(gethui) == "function" then
-		local ok, result = pcall(gethui)
+	if type(executorGetHui) == "function" then
+		local ok, result = pcall(executorGetHui)
 		if ok and result then
 			return result
 		end
@@ -1498,15 +1506,15 @@ local function gotoCheckpoint(name)
 end
 
 local function ensureFolder()
-	if type(isfolder) == "function" and type(makefolder) == "function" then
-		if not isfolder(SAVE_FOLDER) then
-			makefolder(SAVE_FOLDER)
+	if type(executorIsFolder) == "function" and type(executorMakeFolder) == "function" then
+		if not executorIsFolder(SAVE_FOLDER) then
+			executorMakeFolder(SAVE_FOLDER)
 		end
 	end
 end
 
 local function saveReplay()
-	if type(writefile) ~= "function" then
+	if type(executorWriteFile) ~= "function" then
 		log(tr("save_failed") .. ": writefile unavailable")
 		return
 	end
@@ -1531,7 +1539,7 @@ local function saveReplay()
 	end
 	local writeOk, err = pcall(function()
 		ensureFolder()
-		writefile(SAVE_PATH, encoded)
+		executorWriteFile(SAVE_PATH, encoded)
 	end)
 	if writeOk then
 		log(tr("saved") .. ": " .. SAVE_PATH)
@@ -1541,16 +1549,16 @@ local function saveReplay()
 end
 
 local function loadReplay()
-	if type(isfile) ~= "function" or type(readfile) ~= "function" then
+	if type(executorIsFile) ~= "function" or type(executorReadFile) ~= "function" then
 		log(tr("load_failed") .. ": readfile unavailable")
 		return
 	end
-	if not isfile(SAVE_PATH) then
+	if not executorIsFile(SAVE_PATH) then
 		log(tr("load_failed") .. ": " .. SAVE_PATH)
 		return
 	end
 	local okRead, raw = pcall(function()
-		return readfile(SAVE_PATH)
+		return executorReadFile(SAVE_PATH)
 	end)
 	if not okRead then
 		log(tr("load_failed") .. ": readfile")
