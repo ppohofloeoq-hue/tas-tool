@@ -1881,18 +1881,16 @@ connect(RunService.RenderStepped, function(dt)
 			return
 		end
 		playbackAccumulator += clamp(dt * playbackSpeed, 0, PLAYBACK_MAX_ACCUMULATOR)
-		if playbackAccumulator > PLAYBACK_MAX_ACCUMULATOR then
-			playbackAccumulator = PLAYBACK_MAX_ACCUMULATOR
+		if playbackAccumulator > timelineStep * 1.5 then
+			playbackAccumulator = timelineStep * 1.5
 		end
-		local steps = 0
-		while playbackAccumulator >= timelineStep and steps < PLAYBACK_MAX_STEPS_PER_RENDER do
+		if playbackAccumulator >= timelineStep then
 			if playIndex >= #frames then
 				stopPlayback()
-				break
+			else
+				playIndex += 1
+				playbackAccumulator -= timelineStep
 			end
-			playIndex += 1
-			playbackAccumulator -= timelineStep
-			steps += 1
 		end
 		if mode == "play" then
 			local renderFrame = frames[playIndex]
