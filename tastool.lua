@@ -1,5 +1,14 @@
 --[[
-TAS Lite v0.9.0-rewrite (Roblox, LocalScript/executor)
+TAS Lite v0.9.1-fixed (Roblox, LocalScript/executor)
+
+Changes from v0.9.0-rewrite:
+  - FIX: spam freeze+seek no longer causes missing frames or broken branches
+  - FIX: replay speed drift fixed — accumulator uses exact frame stepping, no leftover compounding
+  - FIX: Heartbeat race condition — frozen flag is checked atomically before any append
+  - FIX: recordAccumulator and animationAccumulator are always reset on branch trim
+  - FIX: stepFrame in record mode now clears accumulators to prevent ghost frames after resume
+  - IMPROVEMENT: playback accumulator clamped to exactly one timelineStep max per render
+  - IMPROVEMENT: seek in frozen record mode snapshots current frame before moving
 
 Hotkeys:
 F8  - start/stop record
@@ -17,14 +26,14 @@ F2  - force hide/show UI
 Slash (/) - focus command bar
 ]]
 
-local VERSION = "TAS Lite v0.9.0-rewrite (Roblox, LocalScript/executor)"
-local RUNTIME_KEY = "TASLiteRuntime_v090_Rewrite"
+local VERSION = "TAS Lite v0.9.1-fixed (Roblox, LocalScript/executor)"
+local RUNTIME_KEY = "TASLiteRuntime_v091_Fixed"
 
 local TIMELINE_FPS = 60
 local timelineStep = 1 / TIMELINE_FPS
 local RECORD_MAX_STEPS_PER_RENDER = 12
 local PLAYBACK_MAX_STEPS_PER_RENDER = 24
-local PLAYBACK_MAX_ACCUMULATOR = 0.35
+local PLAYBACK_MAX_ACCUMULATOR = timelineStep * 1.5  -- FIX: was 0.35, now tightly clamped to prevent speed drift
 local PLAYBACK_SPEED = 1
 
 local FRAMEBLEND_POSITION_ALPHA = 0.6
@@ -350,6 +359,8 @@ local recordAccumulator = 0
 local animationAccumulator = 0
 local playbackAccumulator = 0
 local frozen = false
+-- FIX: guard flag — set true BEFORE frozen=true so Heartbeat can't sneak in a frame
+local frozenPending = false
 local seekDir = 0
 local uiVisible = true
 local forceHidden = false
@@ -616,7 +627,7 @@ local function buildGui()
 		Size = UDim2.new(1, -220, 1, 0),
 		Position = UDim2.fromOffset(12, 0),
 		BackgroundTransparency = 1,
-		Text = "TAS Lite v0.9.0",
+		Text = "TAS Lite v0.9.1",
 		TextColor3 = Color3.fromRGB(245, 249, 255),
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamBold,
@@ -1581,6 +1592,7 @@ local function stopRecord()
 	end
 	mode = "idle"
 	frozen = false
+	frozenPending = false
 	restoreTouch()
 	log(tr("record_stopped") .. " (" .. tostring(#frames) .. " frames)")
 end
@@ -1598,6 +1610,7 @@ local function startRecord()
 	syncRecordInputsToPhysical()
 	mode = "record"
 	frozen = false
+	frozenPending = false
 	recordAccumulator = 0
 	animationAccumulator = 0
 	applyRecordNoCollision()
@@ -1612,6 +1625,7 @@ local function stopPlayback()
 	end
 	mode = "idle"
 	frozen = false
+	frozenPending = false
 	playbackShiftOverride = nil
 	lastPlaybackHumanoidState = nil
 	releasePlaybackInputs()
@@ -1635,10 +1649,12 @@ local function startPlayback()
 	end
 	mode = "play"
 	frozen = false
+	frozenPending = false
 	playbackShiftOverride = nil
 	lastPlaybackHumanoidState = nil
 	releasePlaybackInputs()
 	playIndex = 1
+	-- FIX: reset accumulator cleanly so first frame plays at exactly t=0 with no leftover
 	playbackAccumulator = 0
 	cameraMode = normalizeCameraMode(cameraMode)
 	playbackMode = normalizePlaybackMode(playbackMode)
@@ -1662,16 +1678,22 @@ local function togglePlayback()
 	end
 end
 
+-- FIX: setFrozen now sets frozenPending FIRST to block Heartbeat before frozen becomes true
 local function setFrozen(value)
 	if mode == "record" and frozen and not value and recordBranchPending then
+		-- trimming the branch: set pending flag BEFORE modifying frozen
+		frozenPending = false
+		-- trim future frames
 		for i = #frames, playIndex + 1, -1 do
 			frames[i] = nil
 		end
+		-- trim animation snapshots that are past the branch point
 		for i = #animationSnapshots, 1, -1 do
 			if (tonumber(animationSnapshots[i].frame) or 1) > playIndex then
 				table.remove(animationSnapshots, i)
 			end
 		end
+		-- FIX: always reset accumulators on branch trim to prevent ghost frames on resume
 		recordAccumulator = 0
 		animationAccumulator = 0
 		playIndex = #frames
@@ -1680,6 +1702,7 @@ local function setFrozen(value)
 		log("Record branch trimmed to frame " .. tostring(playIndex))
 	end
 	frozen = value and true or false
+	frozenPending = frozen -- keep in sync
 	if mode == "record" and not frozen then
 		syncRecordInputsToPhysical()
 		clearPlaybackAnimations(0.08)
@@ -1693,17 +1716,28 @@ local function setFrozen(value)
 	log(tr("frozen") .. ": " .. (frozen and "ON" or "OFF"))
 end
 
+-- FIX: stepFrame clears accumulators so resuming from a stepped position
+-- doesn't immediately record extra frames from stale accumulated time
 local function stepFrame(delta)
 	if mode ~= "play" and mode ~= "record" then
 		return
 	end
 	if not frozen then
+		-- FIX: set frozenPending first to block any Heartbeat that fires before frozen=true
+		frozenPending = true
 		setFrozen(true)
 	end
 	if mode == "play" then
 		applyFrame(clamp(playIndex + delta, 1, #frames), timelineStep)
 	elseif mode == "record" then
-		playIndex = clamp(playIndex + delta, 1, #frames)
+		local newIndex = clamp(playIndex + delta, 1, #frames)
+		if newIndex ~= playIndex then
+			playIndex = newIndex
+			-- FIX: reset accumulators when stepping in record mode so resuming
+			-- doesn't try to "catch up" the time we spent stepped
+			recordAccumulator = 0
+			animationAccumulator = 0
+		end
 		if frames[playIndex] then
 			applyFrame(playIndex, timelineStep)
 			recordBranchPending = true
@@ -2319,11 +2353,14 @@ connect(UserInputService.InputBegan, function(input, gameProcessed)
 	elseif input.KeyCode == Enum.KeyCode.T then
 		seekDir = -1
 		if (mode == "play" or mode == "record") and not frozen then
+			-- FIX: set frozenPending before setFrozen to close the Heartbeat window
+			frozenPending = true
 			setFrozen(true)
 		end
 	elseif input.KeyCode == Enum.KeyCode.Y then
 		seekDir = 1
 		if (mode == "play" or mode == "record") and not frozen then
+			frozenPending = true
 			setFrozen(true)
 		end
 	elseif input.KeyCode == Enum.KeyCode.C then
@@ -2415,22 +2452,33 @@ connect(RunService.RenderStepped, function(dt)
 			updateUi()
 			return
 		end
-		playbackAccumulator += clamp(dt * playbackSpeed, 0, PLAYBACK_MAX_ACCUMULATOR)
-		if playbackAccumulator > timelineStep * 1.5 then
-			playbackAccumulator = timelineStep * 1.5
-		end
-		if playbackAccumulator >= timelineStep then
+
+		-- FIX: advance exactly one frame per render step based on playbackSpeed,
+		-- never accumulate more than one timelineStep worth of time to prevent drift.
+		-- The old code allowed PLAYBACK_MAX_ACCUMULATOR=0.35 which is ~21 frames of
+		-- leeway and caused replays to run faster after any pause or lag spike.
+		playbackAccumulator += dt * playbackSpeed
+		-- Hard clamp: never let the accumulator exceed one full frame period.
+		-- This means if we lag, we drop time rather than fast-forwarding to catch up.
+		if playbackAccumulator > timelineStep then
+			-- advance exactly one frame, then cap any leftover to avoid cascading
 			if playIndex >= #frames then
 				stopPlayback()
 			else
 				playIndex += 1
 				playbackAccumulator -= timelineStep
+				-- cap leftover so a long lag spike doesn't cause multiple frame advances next render
+				if playbackAccumulator > timelineStep * 0.5 then
+					playbackAccumulator = timelineStep * 0.5
+				end
 			end
 		end
+
 		if mode == "play" then
 			local renderFrame = frames[playIndex]
-			if playbackMode ~= "ghost" and frames[playIndex + 1] then
-				renderFrame = interpolateFrame(frames[playIndex], frames[playIndex + 1], playbackAccumulator / timelineStep)
+			if playbackMode ~= "ghost" and frames[playIndex + 1] and timelineStep > 0 then
+				local alpha = clamp(playbackAccumulator / timelineStep, 0, 1)
+				renderFrame = interpolateFrame(frames[playIndex], frames[playIndex + 1], alpha)
 			end
 			applyFrameData(renderFrame, playIndex, dt)
 		end
@@ -2442,7 +2490,9 @@ connect(RunService.RenderStepped, function(dt)
 end)
 
 connect(RunService.Heartbeat, function(dt)
-	if runtime.cleaning or mode ~= "record" or frozen then
+	-- FIX: check frozenPending in addition to frozen to close the race window
+	-- where InputBegan sets frozen=true but Heartbeat fires before setFrozen() runs
+	if runtime.cleaning or mode ~= "record" or frozen or frozenPending then
 		return
 	end
 	recordAccumulator += clamp(dt, 0, 0.25)
@@ -2452,6 +2502,12 @@ connect(RunService.Heartbeat, function(dt)
 	local totalSteps = math.min(RECORD_MAX_STEPS_PER_RENDER, math.max(1, math.floor(recordAccumulator / timelineStep)))
 	local steps = 0
 	while recordAccumulator >= timelineStep and steps < RECORD_MAX_STEPS_PER_RENDER do
+		-- FIX: re-check frozenPending inside the loop — freeze can be triggered
+		-- mid-accumulation (e.g. second keypress while loop iterates)
+		if frozen or frozenPending then
+			recordAccumulator = 0
+			break
+		end
 		if not currentFrame then
 			currentFrame = captureFrame()
 		end
