@@ -401,12 +401,16 @@ local captureAnimationSnapshot
 local animateScriptState = {}
 local recordMouseDelta = Vector2.new(0, 0)
 
+-- GUI element references
 local gui
 local rootFrame
 local statusLabel
 local commandBox
 local logLabel
+local progressBack
 local progressFill
+local progressScrubber
+local progressDragging = false
 local settingsFrame
 local langButton
 local playbackButton
@@ -417,6 +421,21 @@ local speedButton
 local freezeButton
 local shiftBadge
 local loadingFrame
+-- HappaTAS-style elements
+local frameCountLabel
+local modeIndicator
+local recButton
+local playButton
+local saveButton
+local loadButton
+local savestatePanel
+local savestateListFrame
+local savestateNameBox
+local ghostFrame   -- ghost character parts container
+local ghostEnabled = false
+local ghostParts = {}
+local savedStates = {}  -- { name=string, index=number, frames=table, snapshots=table }
+local savestateListButtons = {}
 
 local text = {
 	ru = {
@@ -598,6 +617,212 @@ local function makeButton(parent, textValue, size)
 	return button
 end
 
+-- ============================================================
+-- HappaTAS-style savestate system
+-- ============================================================
+local function rebuildSavestateList()
+	if not savestateListFrame then return end
+	-- clear old buttons
+	for _, btn in ipairs(savestateListButtons) do
+		if btn and btn.Parent then pcall(function() btn:Destroy() end) end
+	end
+	savestateListButtons = {}
+
+	local Y = 0
+	for i, ss in ipairs(savedStates) do
+		local row = safeNew("Frame", {
+			Size = UDim2.new(1, 0, 0, 28),
+			Position = UDim2.fromOffset(0, Y),
+			BackgroundColor3 = Color3.fromRGB(28, 38, 56),
+			BorderSizePixel = 0,
+		}, savestateListFrame)
+		setCorner(row, 5)
+
+		local nameLabel = safeNew("TextLabel", {
+			Size = UDim2.new(1, -120, 1, 0),
+			Position = UDim2.fromOffset(8, 0),
+			BackgroundTransparency = 1,
+			Text = ss.name .. "  [" .. tostring(ss.index) .. "]",
+			TextColor3 = Color3.fromRGB(210, 230, 255),
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Font = Enum.Font.GothamSemibold,
+			TextSize = 12,
+		}, row)
+
+		local loadBtn = safeNew("TextButton", {
+			Size = UDim2.fromOffset(54, 20),
+			Position = UDim2.new(1, -116, 0.5, -10),
+			BackgroundColor3 = Color3.fromRGB(40, 100, 70),
+			BorderSizePixel = 0,
+			Text = "Load",
+			TextColor3 = Color3.fromRGB(200, 255, 220),
+			Font = Enum.Font.GothamSemibold,
+			TextSize = 11,
+			AutoButtonColor = true,
+		}, row)
+		setCorner(loadBtn, 4)
+
+		local delBtn = safeNew("TextButton", {
+			Size = UDim2.fromOffset(54, 20),
+			Position = UDim2.new(1, -58, 0.5, -10),
+			BackgroundColor3 = Color3.fromRGB(100, 40, 40),
+			BorderSizePixel = 0,
+			Text = "Delete",
+			TextColor3 = Color3.fromRGB(255, 200, 200),
+			Font = Enum.Font.GothamSemibold,
+			TextSize = 11,
+			AutoButtonColor = true,
+		}, row)
+		setCorner(delBtn, 4)
+
+		local capturedIndex = i
+		connect(loadBtn.MouseButton1Click, function()
+			local ss2 = savedStates[capturedIndex]
+			if not ss2 then return end
+			-- restore frames up to savestate, set playIndex
+			if mode == "record" then
+				-- deep copy the saved frames as our new base
+				local newFrames = {}
+				for _, f in ipairs(ss2.frames) do
+					table.insert(newFrames, f)
+				end
+				frames = newFrames
+				animationSnapshots = {}
+				for _, snap in ipairs(ss2.snapshots) do
+					table.insert(animationSnapshots, snap)
+				end
+				playIndex = clamp(ss2.index, 1, math.max(#frames, 1))
+				recordAccumulator = 0
+				animationAccumulator = 0
+				recordBranchPending = true
+				if #frames > 0 then
+					applyFrame(playIndex, timelineStep)
+				end
+				log("Savestate loaded: " .. ss2.name .. " (frame " .. ss2.index .. ")")
+			elseif mode == "play" or mode == "idle" then
+				local newFrames = {}
+				for _, f in ipairs(ss2.frames) do
+					table.insert(newFrames, f)
+				end
+				frames = newFrames
+				animationSnapshots = {}
+				for _, snap in ipairs(ss2.snapshots) do
+					table.insert(animationSnapshots, snap)
+				end
+				playIndex = clamp(ss2.index, 1, math.max(#frames, 1))
+				if #frames > 0 then
+					applyFrame(playIndex, timelineStep)
+				end
+				log("Savestate loaded: " .. ss2.name .. " (frame " .. ss2.index .. ")")
+			end
+			updateUi()
+		end)
+		connect(delBtn.MouseButton1Click, function()
+			table.remove(savedStates, capturedIndex)
+			rebuildSavestateList()
+			log("Savestate deleted: " .. (savedStates[capturedIndex] and savedStates[capturedIndex].name or "?"))
+			updateUi()
+		end)
+
+		table.insert(savestateListButtons, row)
+		Y = Y + 32
+	end
+	savestateListFrame.Size = UDim2.new(1, 0, 0, math.max(Y, 4))
+end
+
+local function createSavestate(name)
+	name = tostring(name or ("State " .. tostring(#savedStates + 1)))
+	-- deep copy frames up to playIndex
+	local copiedFrames = {}
+	for i2 = 1, #frames do
+		table.insert(copiedFrames, frames[i2])
+	end
+	local copiedSnaps = {}
+	for _, snap in ipairs(animationSnapshots) do
+		table.insert(copiedSnaps, snap)
+	end
+	table.insert(savedStates, {
+		name = name,
+		index = playIndex,
+		frames = copiedFrames,
+		snapshots = copiedSnaps,
+	})
+	rebuildSavestateList()
+	log("Savestate created: " .. name .. " at frame " .. tostring(playIndex))
+end
+
+-- ============================================================
+-- Ghost playback helper
+-- ============================================================
+local function clearGhost()
+	for _, part in pairs(ghostParts) do
+		if part and part.Parent then
+			pcall(function() part:Destroy() end)
+		end
+	end
+	ghostParts = {}
+end
+
+local function buildGhost()
+	clearGhost()
+	local character = localPlayer.Character
+	if not character then return end
+	for _, part in ipairs(character:GetDescendants()) do
+		if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+			local ghost = Instance.new("Part")
+			ghost.Name = "GhostPart_" .. part.Name
+			ghost.Size = part.Size
+			ghost.Anchored = true
+			ghost.CanCollide = false
+			ghost.CanTouch = false
+			ghost.CastShadow = false
+			ghost.Transparency = 0.55
+			ghost.Color = Color3.fromRGB(100, 180, 255)
+			ghost.Material = Enum.Material.Neon
+			ghost.Parent = workspace
+			ghostParts[part] = ghost
+		end
+	end
+end
+
+local function updateGhost(frameData)
+	if not ghostEnabled or not frameData then return end
+	local character = localPlayer.Character
+	if not character then return end
+	local rootCf = tableToCf(frameData.cf)
+	if not rootCf then return end
+	-- get current character root to compute offset
+	local charRoot = character:FindFirstChild("HumanoidRootPart")
+	if not charRoot then return end
+	local rootOffset = charRoot.CFrame:Inverse() * rootCf
+	for part, ghost in pairs(ghostParts) do
+		if part and part.Parent and ghost and ghost.Parent then
+			pcall(function()
+				ghost.CFrame = part.CFrame * rootOffset:Inverse() * rootCf
+				ghost.Size = part.Size
+			end)
+		elseif ghost and ghost.Parent then
+			pcall(function() ghost:Destroy() end)
+			ghostParts[part] = nil
+		end
+	end
+end
+
+local function setGhostEnabled(enabled)
+	ghostEnabled = enabled and true or false
+	if ghostEnabled then
+		buildGhost()
+		log("Ghost: ON")
+	else
+		clearGhost()
+		log("Ghost: OFF")
+	end
+end
+
+-- ============================================================
+-- buildGui — HappaTAS-style layout
+-- Two columns: left = controls, right = savestates panel
+-- ============================================================
 local function buildGui()
 	gui = safeNew("ScreenGui", {
 		Name = "TASLiteUI",
@@ -606,126 +831,458 @@ local function buildGui()
 	}, nil)
 	runtime.gui = gui
 
+	-- Main window: 560 wide, 420 tall
 	rootFrame = safeNew("Frame", {
-		Size = UDim2.fromOffset(720, 360),
-		Position = UDim2.fromOffset(18, 18),
-		BackgroundColor3 = Color3.fromRGB(17, 22, 31),
+		Size = UDim2.fromOffset(560, 420),
+		Position = UDim2.fromOffset(16, 16),
+		BackgroundColor3 = Color3.fromRGB(14, 19, 28),
 		BorderSizePixel = 0,
 		ClipsDescendants = true,
 	}, gui)
-	setCorner(rootFrame, 10)
-	setStroke(rootFrame, Color3.fromRGB(105, 157, 235), 1, 0.35)
+	setCorner(rootFrame, 12)
+	setStroke(rootFrame, Color3.fromRGB(80, 140, 230), 1.5, 0.2)
 
+	-- ── Header bar ──────────────────────────────────────────
 	local header = safeNew("Frame", {
-		Size = UDim2.new(1, 0, 0, 42),
-		BackgroundColor3 = Color3.fromRGB(33, 50, 78),
+		Size = UDim2.new(1, 0, 0, 40),
+		BackgroundColor3 = Color3.fromRGB(22, 34, 58),
 		BorderSizePixel = 0,
 	}, rootFrame)
-	setCorner(header, 10)
+	setCorner(header, 12)
 
 	safeNew("TextLabel", {
-		Size = UDim2.new(1, -220, 1, 0),
+		Size = UDim2.new(0, 200, 1, 0),
 		Position = UDim2.fromOffset(12, 0),
 		BackgroundTransparency = 1,
-		Text = "TAS Lite v0.9.1",
-		TextColor3 = Color3.fromRGB(245, 249, 255),
+		Text = "HappaTAS Lite",
+		TextColor3 = Color3.fromRGB(255, 255, 255),
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamBold,
-		TextSize = 18,
+		TextSize = 17,
 	}, header)
 
-	shiftBadge = safeNew("TextLabel", {
-		Size = UDim2.fromOffset(132, 24),
-		Position = UDim2.new(1, -142, 0, 9),
-		BackgroundColor3 = Color3.fromRGB(95, 60, 60),
+	modeIndicator = safeNew("TextLabel", {
+		Size = UDim2.fromOffset(90, 26),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.5, 0),
+		BackgroundColor3 = Color3.fromRGB(38, 48, 65),
 		BorderSizePixel = 0,
-		Text = "ShiftLock: OFF",
-		TextColor3 = Color3.fromRGB(255, 230, 230),
+		Text = "IDLE",
+		TextColor3 = Color3.fromRGB(180, 200, 240),
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+	}, header)
+	setCorner(modeIndicator, 7)
+
+	shiftBadge = safeNew("TextLabel", {
+		Size = UDim2.fromOffset(110, 24),
+		Position = UDim2.new(1, -120, 0, 8),
+		BackgroundColor3 = Color3.fromRGB(90, 55, 55),
+		BorderSizePixel = 0,
+		Text = "SHIFT: OFF",
+		TextColor3 = Color3.fromRGB(255, 220, 220),
 		Font = Enum.Font.GothamSemibold,
 		TextSize = 12,
 	}, header)
 	setCorner(shiftBadge, 7)
 
-	statusLabel = safeNew("TextLabel", {
-		Size = UDim2.new(1, -20, 0, 86),
-		Position = UDim2.fromOffset(10, 52),
-		BackgroundColor3 = Color3.fromRGB(24, 32, 45),
-		BorderSizePixel = 0,
-		Text = "",
-		TextColor3 = Color3.fromRGB(231, 239, 255),
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextYAlignment = Enum.TextYAlignment.Top,
-		Font = Enum.Font.Code,
-		TextSize = 14,
-		TextWrapped = true,
-	}, rootFrame)
-	setCorner(statusLabel, 8)
-
-	local progressBack = safeNew("Frame", {
-		Size = UDim2.new(1, -20, 0, 8),
-		Position = UDim2.fromOffset(10, 144),
-		BackgroundColor3 = Color3.fromRGB(38, 48, 65),
-		BorderSizePixel = 0,
-	}, rootFrame)
-	setCorner(progressBack, 4)
-	progressFill = safeNew("Frame", {
-		Size = UDim2.fromScale(0, 1),
-		BackgroundColor3 = Color3.fromRGB(105, 195, 255),
-		BorderSizePixel = 0,
-	}, progressBack)
-	setCorner(progressFill, 4)
-
-	commandBox = safeNew("TextBox", {
-		Size = UDim2.new(1, -20, 0, 32),
-		Position = UDim2.fromOffset(10, 160),
-		BackgroundColor3 = Color3.fromRGB(20, 27, 38),
-		BorderSizePixel = 0,
-		Text = "",
-		PlaceholderText = tr("command"),
-		TextColor3 = Color3.fromRGB(245, 248, 255),
-		PlaceholderColor3 = Color3.fromRGB(145, 160, 184),
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Font = Enum.Font.Code,
-		TextSize = 14,
-		ClearTextOnFocus = false,
-	}, rootFrame)
-	setCorner(commandBox, 8)
-
-	settingsFrame = safeNew("Frame", {
-		Size = UDim2.new(1, -20, 0, 34),
-		Position = UDim2.fromOffset(10, 202),
+	-- ── Left column (280px): frame counter + big buttons + timeline ──
+	local leftCol = safeNew("Frame", {
+		Size = UDim2.fromOffset(266, 370),
+		Position = UDim2.fromOffset(8, 46),
 		BackgroundTransparency = 1,
 	}, rootFrame)
+
+	-- Frame counter display (HappaTAS-style big number)
+	local frameCountBack = safeNew("Frame", {
+		Size = UDim2.new(1, 0, 0, 52),
+		BackgroundColor3 = Color3.fromRGB(18, 26, 42),
+		BorderSizePixel = 0,
+	}, leftCol)
+	setCorner(frameCountBack, 8)
+	setStroke(frameCountBack, Color3.fromRGB(60, 100, 170), 1, 0.5)
+
+	frameCountLabel = safeNew("TextLabel", {
+		Size = UDim2.new(1, 0, 0.6, 0),
+		BackgroundTransparency = 1,
+		Text = "0 / 0",
+		TextColor3 = Color3.fromRGB(255, 255, 255),
+		Font = Enum.Font.GothamBold,
+		TextSize = 26,
+	}, frameCountBack)
+
+	safeNew("TextLabel", {
+		Size = UDim2.new(1, 0, 0.4, 0),
+		Position = UDim2.fromScale(0, 0.6),
+		BackgroundTransparency = 1,
+		Text = "frame / total",
+		TextColor3 = Color3.fromRGB(100, 130, 180),
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+	}, frameCountBack)
+
+	-- Big REC / PLAY buttons (side by side, HappaTAS style)
+	local bigBtnRow = safeNew("Frame", {
+		Size = UDim2.new(1, 0, 0, 52),
+		Position = UDim2.fromOffset(0, 58),
+		BackgroundTransparency = 1,
+	}, leftCol)
+
+	recButton = safeNew("TextButton", {
+		Size = UDim2.fromOffset(126, 52),
+		BackgroundColor3 = Color3.fromRGB(180, 50, 50),
+		BorderSizePixel = 0,
+		Text = "⏺  REC",
+		TextColor3 = Color3.fromRGB(255, 255, 255),
+		Font = Enum.Font.GothamBold,
+		TextSize = 16,
+		AutoButtonColor = true,
+	}, bigBtnRow)
+	setCorner(recButton, 8)
+	setStroke(recButton, Color3.fromRGB(255, 100, 100), 1, 0.5)
+
+	playButton = safeNew("TextButton", {
+		Size = UDim2.fromOffset(126, 52),
+		Position = UDim2.fromOffset(132, 0),
+		BackgroundColor3 = Color3.fromRGB(38, 130, 75),
+		BorderSizePixel = 0,
+		Text = "▶  PLAY",
+		TextColor3 = Color3.fromRGB(255, 255, 255),
+		Font = Enum.Font.GothamBold,
+		TextSize = 16,
+		AutoButtonColor = true,
+	}, bigBtnRow)
+	setCorner(playButton, 8)
+	setStroke(playButton, Color3.fromRGB(100, 230, 130), 1, 0.5)
+
+	-- Save / Load row
+	local saveRow = safeNew("Frame", {
+		Size = UDim2.new(1, 0, 0, 36),
+		Position = UDim2.fromOffset(0, 116),
+		BackgroundTransparency = 1,
+	}, leftCol)
+
+	saveButton = safeNew("TextButton", {
+		Size = UDim2.fromOffset(84, 36),
+		BackgroundColor3 = Color3.fromRGB(38, 70, 120),
+		BorderSizePixel = 0,
+		Text = "💾 Save",
+		TextColor3 = Color3.fromRGB(200, 220, 255),
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 13,
+		AutoButtonColor = true,
+	}, saveRow)
+	setCorner(saveButton, 7)
+
+	loadButton = safeNew("TextButton", {
+		Size = UDim2.fromOffset(84, 36),
+		Position = UDim2.fromOffset(90, 0),
+		BackgroundColor3 = Color3.fromRGB(55, 55, 90),
+		BorderSizePixel = 0,
+		Text = "📂 Load",
+		TextColor3 = Color3.fromRGB(200, 200, 255),
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 13,
+		AutoButtonColor = true,
+	}, saveRow)
+	setCorner(loadButton, 7)
+
+	freezeButton = safeNew("TextButton", {
+		Size = UDim2.fromOffset(84, 36),
+		Position = UDim2.fromOffset(180, 0),
+		BackgroundColor3 = Color3.fromRGB(60, 50, 90),
+		BorderSizePixel = 0,
+		Text = "❄ Freeze",
+		TextColor3 = Color3.fromRGB(210, 200, 255),
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 13,
+		AutoButtonColor = true,
+	}, saveRow)
+	setCorner(freezeButton, 7)
+
+	-- Timeline scrubber (draggable, HappaTAS-style)
+	local timelineLabel = safeNew("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 18),
+		Position = UDim2.fromOffset(0, 160),
+		BackgroundTransparency = 1,
+		Text = "Timeline",
+		TextColor3 = Color3.fromRGB(130, 160, 210),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 12,
+	}, leftCol)
+
+	progressBack = safeNew("Frame", {
+		Size = UDim2.new(1, 0, 0, 20),
+		Position = UDim2.fromOffset(0, 180),
+		BackgroundColor3 = Color3.fromRGB(30, 42, 62),
+		BorderSizePixel = 0,
+	}, leftCol)
+	setCorner(progressBack, 6)
+
+	progressFill = safeNew("Frame", {
+		Size = UDim2.fromScale(0, 1),
+		BackgroundColor3 = Color3.fromRGB(80, 170, 255),
+		BorderSizePixel = 0,
+	}, progressBack)
+	setCorner(progressFill, 6)
+
+	-- Scrubber thumb
+	progressScrubber = safeNew("Frame", {
+		Size = UDim2.fromOffset(16, 20),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0, 0, 0, 0),
+		BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+		BorderSizePixel = 0,
+	}, progressBack)
+	setCorner(progressScrubber, 4)
+
+	-- Scrubber drag
+	connect(progressBack.InputBegan, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			progressDragging = true
+		end
+	end)
+	connect(UserInputService.InputEnded, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			progressDragging = false
+		end
+	end)
+	connect(UserInputService.InputChanged, function(input)
+		if not progressDragging then return end
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+		if #frames <= 0 then return end
+		local pbAbsPos = progressBack.AbsolutePosition
+		local pbAbsSize = progressBack.AbsoluteSize
+		local mouseX = input.Position.X
+		local alpha = clamp((mouseX - pbAbsPos.X) / pbAbsSize.X, 0, 1)
+		local targetFrame = clamp(math.floor(alpha * #frames + 0.5), 1, #frames)
+		if not frozen then
+			frozenPending = true
+			setFrozen(true)
+		end
+		applyFrame(targetFrame, timelineStep)
+		if mode == "record" then recordBranchPending = true end
+		updateUi()
+	end)
+
+	-- Frame step buttons (← →)
+	local stepRow = safeNew("Frame", {
+		Size = UDim2.new(1, 0, 0, 34),
+		Position = UDim2.fromOffset(0, 206),
+		BackgroundTransparency = 1,
+	}, leftCol)
+
+	local prevBtn = safeNew("TextButton", {
+		Size = UDim2.fromOffset(126, 34),
+		BackgroundColor3 = Color3.fromRGB(32, 45, 68),
+		BorderSizePixel = 0,
+		Text = "◀◀  Prev Frame",
+		TextColor3 = Color3.fromRGB(200, 220, 255),
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 13,
+		AutoButtonColor = true,
+	}, stepRow)
+	setCorner(prevBtn, 7)
+
+	local nextBtn = safeNew("TextButton", {
+		Size = UDim2.fromOffset(126, 34),
+		Position = UDim2.fromOffset(132, 0),
+		BackgroundColor3 = Color3.fromRGB(32, 45, 68),
+		BorderSizePixel = 0,
+		Text = "Next Frame  ▶▶",
+		TextColor3 = Color3.fromRGB(200, 220, 255),
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 13,
+		AutoButtonColor = true,
+	}, stepRow)
+	setCorner(nextBtn, 7)
+
+	connect(prevBtn.MouseButton1Click, function() stepFrame(-1) updateUi() end)
+	connect(nextBtn.MouseButton1Click, function() stepFrame(1) updateUi() end)
+
+	-- Settings row (mode toggles)
+	settingsFrame = safeNew("Frame", {
+		Size = UDim2.new(1, 0, 0, 28),
+		Position = UDim2.fromOffset(0, 246),
+		BackgroundTransparency = 1,
+	}, leftCol)
 	local layout = safeNew("UIListLayout", {
 		FillDirection = Enum.FillDirection.Horizontal,
-		Padding = UDim.new(0, 8),
+		Padding = UDim.new(0, 5),
 		SortOrder = Enum.SortOrder.LayoutOrder,
 	}, settingsFrame)
 	layout.Parent = settingsFrame
 
-	freezeButton = makeButton(settingsFrame, "Freeze")
-	playbackButton = makeButton(settingsFrame, "Mode")
-	cameraButton = makeButton(settingsFrame, "Camera")
-	recordModeButton = makeButton(settingsFrame, "Record")
-	nocollisionButton = makeButton(settingsFrame, "CanTouch")
-	speedButton = makeButton(settingsFrame, "Speed")
-	langButton = makeButton(settingsFrame, "Lang")
+	local function smallBtn(parent, txt)
+		local b = safeNew("TextButton", {
+			Size = UDim2.fromOffset(74, 28),
+			BackgroundColor3 = Color3.fromRGB(32, 44, 65),
+			BorderSizePixel = 0,
+			Text = txt,
+			TextColor3 = Color3.fromRGB(200, 220, 255),
+			Font = Enum.Font.GothamSemibold,
+			TextSize = 11,
+			AutoButtonColor = true,
+		}, parent)
+		setCorner(b, 5)
+		return b
+	end
 
-	logLabel = safeNew("TextLabel", {
-		Size = UDim2.new(1, -20, 1, -248),
-		Position = UDim2.fromOffset(10, 242),
-		BackgroundColor3 = Color3.fromRGB(13, 18, 26),
+	playbackButton = smallBtn(settingsFrame, "Mode")
+	cameraButton = smallBtn(settingsFrame, "Cam")
+	recordModeButton = smallBtn(settingsFrame, "Rec")
+	nocollisionButton = smallBtn(settingsFrame, "Touch")
+
+	-- Ghost + Speed on second row
+	local settingsFrame2 = safeNew("Frame", {
+		Size = UDim2.new(1, 0, 0, 28),
+		Position = UDim2.fromOffset(0, 280),
+		BackgroundTransparency = 1,
+	}, leftCol)
+	local layout2 = safeNew("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 5),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, settingsFrame2)
+	layout2.Parent = settingsFrame2
+
+	speedButton = smallBtn(settingsFrame2, "Speed")
+	langButton = smallBtn(settingsFrame2, "Lang")
+
+	local ghostButton = smallBtn(settingsFrame2, "Ghost: OFF")
+	connect(ghostButton.MouseButton1Click, function()
+		setGhostEnabled(not ghostEnabled)
+		ghostButton.Text = "Ghost: " .. (ghostEnabled and "ON" or "OFF")
+		ghostButton.BackgroundColor3 = ghostEnabled and Color3.fromRGB(30, 70, 110) or Color3.fromRGB(32, 44, 65)
+		updateUi()
+	end)
+
+	-- Command bar
+	commandBox = safeNew("TextBox", {
+		Size = UDim2.new(1, 0, 0, 28),
+		Position = UDim2.fromOffset(0, 315),
+		BackgroundColor3 = Color3.fromRGB(18, 26, 40),
 		BorderSizePixel = 0,
 		Text = "",
-		TextColor3 = Color3.fromRGB(186, 238, 206),
+		PlaceholderText = tr("command"),
+		TextColor3 = Color3.fromRGB(240, 248, 255),
+		PlaceholderColor3 = Color3.fromRGB(110, 140, 180),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.Code,
+		TextSize = 13,
+		ClearTextOnFocus = false,
+	}, leftCol)
+	setCorner(commandBox, 6)
+
+	-- Log
+	logLabel = safeNew("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 48),
+		Position = UDim2.fromOffset(0, 349),
+		BackgroundColor3 = Color3.fromRGB(10, 15, 22),
+		BorderSizePixel = 0,
+		Text = "",
+		TextColor3 = Color3.fromRGB(150, 230, 180),
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextYAlignment = Enum.TextYAlignment.Top,
 		Font = Enum.Font.Code,
-		TextSize = 13,
+		TextSize = 12,
 		TextWrapped = false,
-	}, rootFrame)
-	setCorner(logLabel, 8)
+	}, leftCol)
+	setCorner(logLabel, 6)
 
+	-- ── Right column: Savestates panel ──────────────────────
+	local rightCol = safeNew("Frame", {
+		Size = UDim2.fromOffset(270, 370),
+		Position = UDim2.fromOffset(282, 46),
+		BackgroundColor3 = Color3.fromRGB(16, 22, 36),
+		BorderSizePixel = 0,
+		ClipsDescendants = true,
+	}, rootFrame)
+	setCorner(rightCol, 10)
+	setStroke(rightCol, Color3.fromRGB(50, 90, 160), 1, 0.5)
+
+	safeNew("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 28),
+		BackgroundColor3 = Color3.fromRGB(22, 34, 60),
+		BorderSizePixel = 0,
+		Text = "Savestates",
+		TextColor3 = Color3.fromRGB(200, 220, 255),
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+	}, rightCol)
+
+	-- Name input + Create button
+	savestateNameBox = safeNew("TextBox", {
+		Size = UDim2.new(1, -74, 0, 28),
+		Position = UDim2.fromOffset(4, 32),
+		BackgroundColor3 = Color3.fromRGB(20, 30, 48),
+		BorderSizePixel = 0,
+		Text = "",
+		PlaceholderText = "State name...",
+		TextColor3 = Color3.fromRGB(230, 240, 255),
+		PlaceholderColor3 = Color3.fromRGB(90, 120, 170),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.Gotham,
+		TextSize = 13,
+		ClearTextOnFocus = false,
+	}, rightCol)
+	setCorner(savestateNameBox, 6)
+
+	local createSsBtn = safeNew("TextButton", {
+		Size = UDim2.fromOffset(64, 28),
+		Position = UDim2.new(1, -68, 0, 32),
+		BackgroundColor3 = Color3.fromRGB(48, 105, 185),
+		BorderSizePixel = 0,
+		Text = "+ Create",
+		TextColor3 = Color3.fromRGB(220, 235, 255),
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 12,
+		AutoButtonColor = true,
+	}, rightCol)
+	setCorner(createSsBtn, 6)
+	connect(createSsBtn.MouseButton1Click, function()
+		local name = savestateNameBox.Text
+		if name == "" then name = "State " .. tostring(#savedStates + 1) end
+		createSavestate(name)
+		savestateNameBox.Text = ""
+		updateUi()
+	end)
+
+	-- Scrollable list
+	local listScroll = safeNew("ScrollingFrame", {
+		Size = UDim2.new(1, -8, 1, -68),
+		Position = UDim2.fromOffset(4, 64),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 4,
+		ScrollBarImageColor3 = Color3.fromRGB(80, 130, 220),
+		CanvasSize = UDim2.fromScale(1, 0),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	}, rightCol)
+
+	savestateListFrame = safeNew("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+	}, listScroll)
+
+	savestatePanel = rightCol
+
+	-- Status label (below savestates, overlaid on left col bottom)
+	statusLabel = safeNew("TextLabel", {
+		Size = UDim2.fromOffset(266, 0),
+		Position = UDim2.fromOffset(8, 398),
+		BackgroundTransparency = 1,
+		Text = "",
+		TextColor3 = Color3.fromRGB(130, 160, 210),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.Code,
+		TextSize = 10,
+		TextWrapped = false,
+		AutomaticSize = Enum.AutomaticSize.Y,
+	}, rootFrame)
+
+	-- Loading overlay
 	loadingFrame = safeNew("Frame", {
 		Size = UDim2.fromScale(1, 1),
 		BackgroundColor3 = Color3.fromRGB(8, 12, 18),
@@ -736,33 +1293,30 @@ local function buildGui()
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.46),
 		BackgroundTransparency = 1,
-		Text = "TAS Lite",
+		Text = "HappaTAS Lite",
 		TextColor3 = Color3.fromRGB(242, 247, 255),
 		Font = Enum.Font.GothamBold,
 		TextSize = 28,
 	}, loadingFrame)
 	local loadingLine = safeNew("Frame", {
-		Size = UDim2.fromOffset(0, 5),
+		Size = UDim2.fromOffset(0, 4),
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(0.5, 0.54),
-		BackgroundColor3 = Color3.fromRGB(90, 185, 255),
+		Position = UDim2.fromScale(0.5, 0.55),
+		BackgroundColor3 = Color3.fromRGB(80, 170, 255),
 		BorderSizePixel = 0,
 	}, loadingFrame)
 	setCorner(loadingLine, 3)
 	pcall(function()
 		TweenService:Create(loadingLine, TweenInfo.new(0.65, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-			Size = UDim2.fromOffset(360, 5),
-		}):Play()
-		TweenService:Create(loadingTitle, TweenInfo.new(0.65, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-			TextTransparency = 0,
+			Size = UDim2.fromOffset(340, 4),
 		}):Play()
 	end)
-	task.delay(0.8, function()
+	task.delay(0.85, function()
 		if loadingFrame and loadingFrame.Parent then
 			pcall(function()
-				TweenService:Create(loadingFrame, TweenInfo.new(0.25), { BackgroundTransparency = 1 }):Play()
+				TweenService:Create(loadingFrame, TweenInfo.new(0.22), { BackgroundTransparency = 1 }):Play()
 			end)
-			task.wait(0.28)
+			task.wait(0.25)
 			if loadingFrame and loadingFrame.Parent then
 				loadingFrame:Destroy()
 			end
